@@ -3253,7 +3253,10 @@ struct VduseControllerImpl : VduseController {
         }
         // Unlinked while the claim is still held -- the release is deferred to scope
         // exit, after this statement -- so what goes is provably the tombstone this
-        // call opened, not one another daemon created in between.
+        // call opened, not one another daemon created in between. Both halves of that
+        // are load bearing: the held lock keeps a peer out, and devlock_acquire's
+        // identity check is what makes the lock a claim on the NAME rather than on an
+        // inode the name may already have moved off.
         if (devlock_unlink(lock_dir, ln) < 0)
             return -1;   // devlock_unlink logged it
         return 0;

@@ -2128,7 +2128,8 @@ TEST_F(NbdTest, an_option_payload_is_parsed_not_skipped) {
 // A server that closes mid-handshake has to read out as a CLOSE. photon's read()
 // answers a short count at EOF and -1 with errno set on error, and read_exact()
 // collapses the two into -1 -- so until it named the EOF case, errno held whatever the
-// last fd wait left behind, which is photon's EOK sentinel ENXIO (io/fd-events.h:33).
+// last fd wait left behind, which is photon's EOK sentinel ENXIO (photon::EOK in
+// io/fd-events.h).
 // A client failure then reported "no such device" for a socket the peer had simply
 // closed, and that reading sent two separate investigations after a phantom device
 // error: this one, and an Oct-3 log whose leftover happened to be ENOSYS instead.

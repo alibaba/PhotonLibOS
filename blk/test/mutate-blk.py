@@ -6,12 +6,12 @@ The companion to blk/test/mutate-vhost-user.py, and the second half of ONE
 ledger. The multiqueue workstream ran seventeen mutants by hand, editing source
 with sed against anchors grepped from the live tree, and none of the seventeen
 is reproducible from the repository today -- `git log --all -S nohome` is empty.
-This file carries the eight whose target is utils.cpp, ublk.cpp, tcmu.cpp or
-nbd.cpp. The other nine are refused BY NAME rather than dropped silently; see
-GATED below for the split and the reason for each half.
+This file carries the six whose target is utils.cpp, ublk.cpp, tcmu.cpp or
+nbd.cpp. The other eleven are refused BY NAME rather than dropped silently; see
+GATED and RETIRED below for the split and the reason for each.
 
 Unlike the protocol and EVENT_IDX mutants the companion owns, almost nothing
-here is a guard a mock can trip. Six of the eight are PLACEMENT mutants: the
+here is a guard a mock can trip. Four of the six are PLACEMENT mutants: the
 oracle is test::RecordingFile's set of vcpus, so a detection reads as a vcpu
 count changing or a ran_on(caller) flipping -- not as a protocol error. The two
 exceptions both live in the shared primitives rather than in a transport:
@@ -41,7 +41,7 @@ declaration a later check still reads (-Werror=unused-variable), a deleted
 function whose only caller went with it (-Werror=unused-function), and an
 `if (x) ;` left behind by emptying a body (-Wempty-body). noenginecheck is the
 one mutant here that needs three coordinated deletions to stay compilable, and
-its entry says why. None of the eight is void.
+its entry says why. None of the six is void.
 
 Summary table. "Ledger" is the round that actually ran the mutant; the verdicts
 and the observed failure values are transcribed from SPEC-multiqueue.md 10.4 and
@@ -52,19 +52,22 @@ the CURRENT tree rather than copied out of them.
     --------------  ------  ----------------  --------------------------------
     nomigrate       ublk    10a #1            KILLED
     lateMigrate     ublk    10a #2            KILLED
-    nohome          ublk    Task 4 + 10a #3   KILLED (hang); SURVIVED x2 pre-guard
     tcmunomigrate   tcmu    10a #4            KILLED
-    tcmunohome      tcmu    Task 4 fix1 + 10a #8   KILLED (hang); killing case changed
     nbdnomigrate    nbd     Task 5 Step 6(a)  KILLED
     nomigrateguard  utils   Task 3 Mutant 1   KILLED (process death)
     noenginecheck   utils   Task 3 Mutant 3 + 10b #9a/#9b   KILLED x3
 
-blk/ublk.cpp -- the per-queue owner hop and the teardown hop back:
+Two of the eight this file used to carry are RETIRED, not killed: nohome (ublk)
+and tcmunohome (tcmu). Their entries below carry the measurements they were
+booked with and the reason they can no longer be expressed.
+
+blk/ublk.cpp -- the per-queue owner hop:
 
     nomigrate       # delete `migrate_to_pool(cfg.pool, th)` from start_serving's
                     # owner loop, so every queue's owner coroutine -- and the
-                    # ring, pump and tag coroutines it creates -- stays on the
-                    # caller's vcpu. Killed by UblkTest.pool_placement_n_less_than_m
+                    # ring, pump, tag AND teardown coroutines it creates -- stays
+                    # on the caller's vcpu. Killed by
+                    # UblkTest.pool_placement_n_less_than_m
                     # on `EXPECT_EQ(2u, rec.vcpu_count())` reading 1 and
                     # `EXPECT_FALSE(rec.ran_on(caller))` reading true. Two
                     # siblings go red for the same reason and are not booked
@@ -77,6 +80,13 @@ blk/ublk.cpp -- the per-queue owner hop and the teardown hop back:
                     # was in that binary. lateMigrate below is the same mutation
                     # with a second channel added, and that is why it is the
                     # stronger of the pair.
+                    #
+                    # This is also the ONLY mutant left that can put a teardown on
+                    # the wrong vcpu, and it does so by putting the whole queue
+                    # there: queue_setup creates the teardown coroutine as its
+                    # first act, so it inherits whatever vcpu the owner landed on.
+                    # There is no second, teardown-time hop to delete any more --
+                    # see RETIRED below for the mutant that used to do that.
 
     lateMigrate     # move the same call to just after `oa.done.wait(1)`, i.e.
                     # after the owner has already run queue_setup and signalled.
@@ -91,98 +101,21 @@ blk/ublk.cpp -- the per-queue owner hop and the teardown hop back:
                     # number it saw beside that message; it is deliberately not
                     # repeated here, because it drifts with utils.cpp.
 
-    nohome          # delete the `thread_migrate(th, q->home)` in
-                    # run_queue_teardown. WHAT THIS MUTANT MEANS changed when the hop
-                    # became refuse-and-propagate, so its two older verdicts are not
-                    # comparable to this one and were re-measured rather than carried
-                    # over: with no migration, queue_teardown_thunk finds itself on the
-                    # creator's vcpu, DECLINES to call queue_teardown, and
-                    # run_queue_teardown returns false. Under the pre-guard shape it
-                    # instead ran the whole teardown on the wrong vcpu, which is a much
-                    # quieter thing.
-                    #
-                    # KILLED, deterministically, by UblkTest.pool_placement_n_less_than_m
-                    # -- and killed by a HANG (rc=124 at a 300 s timeout) rather than by an
-                    # assertion, which is worth saying out loud because a hang is a worse
-                    # oracle than a red EXPECT. The log shows both per-queue refusals ("queue
-                    # 0 of dev 0 was left UP...", "queue 1..."), then stop_serving's leak
-                    # line, then nothing. The detection and the deadlock are
-                    # the same phenomenon: the pump and the tags survive as coroutines on
-                    # the pool's vcpus, a vcpu does not shut down while one is left on it
-                    # (photon::fini() ends in vcpu_fini(), which spins in wait_all() until
-                    # the run queue is down to the idler and the caller and both the sleep
-                    # and the standby queue are empty), and ~WorkPool joins its worker
-                    # threads. That is also why no test-side observation point was needed
-                    # -- the one adjudication T10-17 permanently rejected adding, and the
-                    # reason this entry was a SURVIVAL at all.
-                    #
-                    # T10-17's structural reading was correct about the shape it was
-                    # handed, and is kept here because it is still the reason no PLACEMENT
-                    # oracle can catch a cross-vcpu teardown: thread_interrupt has a
-                    # first-class cross-vcpu path, thread_join is vcpu-independent,
-                    # iouring_abandon's entire body is `m_generation++`, and the suite's
-                    # only placement probe -- test::RecordingFile -- records the vcpu of
-                    # the coroutines that CALL THE BACKEND, which an interrupted tag
-                    # resumes on unchanged. So the recorded set is {q->home} under either
-                    # shape. What the refusal adds is a second, non-placement channel: the
-                    # teardown either happens or it does not, and "it did not" is now
-                    # fatal on its own.
-                    #
-                    # A mechanism this entry used to carry -- that the hop protects
-                    # iouring_abandon(q->ce) and `delete q->ce` from being run by a foreign
-                    # OS thread -- stays WITHDRAWN, and is recorded as withdrawn because it
-                    # gets re-derived by mistake: abandon() only bumps a plain uint64_t,
-                    # and the delete is sequenced after the pump join and every tag join.
-                    #
-                    # History, not evidence: Task 4 saw no effect across the full suite
-                    # plus five repeats, and 10a #3 saw GREEN x4 with no hang and no
-                    # crash. Both measured the pre-guard shape.
+blk/tcmu.cpp -- the owner hop that carries the pump and the stopper:
 
-blk/tcmu.cpp -- the pump hop and the serve_stop hop:
-
-    tcmunomigrate   # delete `migrate_to_pool(pool, pump_th)` from serve_start, so
-                    # the pump -- and therefore the ring it drains -- stays on the
-                    # caller's vcpu. Killed by
+    tcmunomigrate   # delete `migrate_to_pool(pool, th)` from serve_start, so the
+                    # owner coroutine -- and the pump and the serve_stop thunk it
+                    # creates -- stay on the caller's vcpu. Killed by
                     # TcmuTest.pool_placement_pump_off_the_caller_vcpu, on three
                     # assertions drawn from one RecordingFile: ran_on(caller)
                     # reading true, and vcpu_count reading 1 against an expected 2
                     # both at the first placement check and at the one after the
                     # restart. The restart half is the interesting one: a device
                     # that never left the caller's vcpu cannot add a vcpu by being
-                    # restarted. Single-path, like nomigrate.
-
-    tcmunohome      # delete the `thread_migrate(th, home)` in run_serve_stop. As with
-                    # ublk's `nohome`, WHAT THIS MEANS changed with the refusal guard: the
-                    # thunk now finds itself on the creator's vcpu, declines to run
-                    # serve_stop, and run_serve_stop returns false, so the pump and the
-                    # handle_cmd coroutines stay alive on the serving vcpu.
-                    #
-                    # KILLED, deterministically, and by a HANG (rc=124 at a 300 s
-                    # timeout). The killing case is
-                    # TcmuTest.pool_placement_pump_off_the_caller_vcpu -- the first pool
-                    # case in suite order -- and the old booking is now exactly inverted:
-                    # it said "killed by pool_serving_stop_under_load, and by nothing
-                    # else", and named this case as the one the plan expected to kill it
-                    # but the ledger measured GREEN. Under the refusal shape
-                    # pool_serving_stop_under_load never runs at all (0 occurrences in the
-                    # log), because the suite is already stuck two cases earlier. The old
-                    # verdict was measured against the pre-guard shape, where serve_stop
-                    # ran anyway and only a placement oracle could tell.
-                    #
-                    # What the log shows: four refusals from run_serve_stop, then
-                    # ~TcmuServer's leak line, then two event engines finishing, then
-                    # nothing. That sequence is also the only exercise the ~TcmuServer
-                    # refusal branch has ever had -- it is unreachable on a healthy run,
-                    # since it takes a stop that was refused AND a caller that went on to
-                    # destroy the server anyway, and no case constructs that on purpose.
-                    # Booked as observed-once-under-mutation, not as covered.
-                    #
-                    # The hang is the deliberate leak, not a separate defect: the surviving
-                    # pump is a coroutine on the pool's vcpu, photon::fini() ends in
-                    # vcpu_fini() spinning in wait_all() until that vcpu is down to the
-                    # idler and the caller with empty sleep and standby queues, and
-                    # ~WorkPool joins its worker threads. ublk's serving_leaked carries the
-                    # full chain.
+                    # restarted. Single-path, like nomigrate, and for the same
+                    # reason the only mutant left that can misplace a stop:
+                    # serve_owner creates both coroutines, so both inherit the one
+                    # landing this call decides.
 
 blk/nbd.cpp -- the per-connection hop:
 
@@ -291,6 +224,62 @@ blk/utils.cpp -- the two shared primitives every transport calls:
                     # endpoint listens, and only the client handshake fails, with
                     # no diagnostic at all. The primitive-level case is the one
                     # with a deterministic shape.
+
+RETIRED -- two mutants this file carried and measured, whose TARGET NO LONGER
+EXISTS. Not killed and not skipped: the code they deleted was removed on purpose,
+so the mutation cannot be expressed any more. That is a stronger result than a
+kill, and it is recorded here rather than dropped because both were booked
+KILLED and a reader comparing against the old ledger would otherwise read the
+disappearance as a lost mutant.
+
+Both deleted a teardown-time `photon::thread_migrate(th, <home>)` -- ublk's in
+run_queue_teardown, tcmu's in run_serve_stop -- and both were killed by a HANG
+(rc=124 at a 300 s timeout), not by an assertion. The hang and the detection were
+one phenomenon: with the migration gone, the thunk found itself on the creator's
+vcpu and DECLINED to run the teardown, so the pump and the per-tag / per-command
+coroutines survived on the pool's vcpus, photon::fini() ends in vcpu_fini()
+spinning in wait_all() until that vcpu is down to the idler and the caller with
+empty sleep and standby queues, and ~WorkPool joins its worker threads.
+
+ublk's was killed by UblkTest.pool_placement_n_less_than_m and logged both
+per-queue refusals ("queue 0 of dev 0 was left UP...", "queue 1...") followed by
+stop_serving's leak line. tcmu's was killed by
+TcmuTest.pool_placement_pump_off_the_caller_vcpu -- the first pool case in suite
+order -- and logged four refusals, ~TcmuServer's leak line, then two event
+engines finishing. That booking was itself an inversion of an older one which
+named pool_serving_stop_under_load as the killer; under the refusal shape that
+case never ran at all (0 occurrences in the log), because the suite was already
+stuck two cases earlier. The older verdict had been measured against the
+pre-refusal shape, where the teardown ran anyway and only a placement oracle
+could tell. That run was also the only exercise ~TcmuServer's leak branch ever
+had, and it is booked as observed-once-under-mutation, never as covered.
+
+What removed the target: both teardowns now run in a coroutine created at START
+time, on the vcpu the serving coroutines land on, and stopping only signals a
+semaphore and joins it. There is no hop left to delete, and nothing that can be
+refused -- which is the point. The measurements above stay in the record because
+the hang mechanism they document is still the consequence of leaving a serving
+coroutine on a pool vcpu; only the refusal that produced it is gone.
+
+T10-17's structural reading is kept with them, because it is still why no
+PLACEMENT oracle can catch a cross-vcpu teardown and would still apply to any
+future one: thread_interrupt has a first-class cross-vcpu path, thread_join is
+vcpu-independent, iouring_abandon's entire body is `m_generation++`, and the
+suite's only placement probe -- test::RecordingFile -- records the vcpu of the
+coroutines that CALL THE BACKEND, which an interrupted tag resumes on unchanged.
+What the refusal had added was a second, non-placement channel: the teardown
+either happened or it did not, and "it did not" was fatal on its own.
+
+A mechanism one of these entries used to carry -- that the hop protects
+iouring_abandon(q->ce) and `delete q->ce` from being run by a foreign OS thread
+-- stays WITHDRAWN, and is recorded as withdrawn because it gets re-derived by
+mistake: abandon() only bumps a plain uint64_t, and the delete is sequenced after
+the pump join and every tag join.
+
+History, not evidence: Task 4 saw no effect from ublk's across the full suite
+plus five repeats, and 10a #3 saw GREEN x4 with no hang and no crash. Both
+measured the shape before the refusal guard, and both predate the shape that
+retired them.
 
 Recorded by the ledger but deliberately NOT carried as a mutant here, so the
 next reader does not think it was overlooked:
@@ -413,21 +402,36 @@ GATED = {
 MUTANTS = {
     "nomigrate": "ublk",
     "lateMigrate": "ublk",
-    "nohome": "ublk",
     "tcmunomigrate": "tcmu",
-    "tcmunohome": "tcmu",
     "nbdnomigrate": "nbd",
     "nomigrateguard": "utils",
     "noenginecheck": "utils",
 }
 
+# The two whose target was removed rather than refused -- see RETIRED in the
+# docstring for the measurements they are booked with. Asking for one gets that
+# explanation, not a KeyError and not a silent no-op.
+RETIRED_REASON = (
+    "deleted a teardown-time thread_migrate that no longer exists: both teardowns "
+    "now run in a coroutine created at START time on the serving vcpu, so stopping "
+    "only signals a semaphore and joins it. There is no hop left to delete, and "
+    "nothing that can be refused. Its booked verdict and the hang mechanism behind "
+    "it are in RETIRED at the top of this file; the placement mutant for the same "
+    "transport (nomigrate / tcmunomigrate) is the one that now decides where the "
+    "teardown runs")
+
+RETIRED = {
+    "nohome": RETIRED_REASON,
+    "tcmunohome": RETIRED_REASON,
+}
+
 # The ledger's seventeen. `check` proves two things about the split above and
-# only two: that the two halves are disjoint, and that together they number
-# seventeen, so a name silently dropped from BOTH halves is caught. It does not
-# compare the names against the ledger's -- that list lives in the plan document,
-# and copying it here would turn a rename into a bookkeeping failure rather than
-# leaving it a mutation one.
-LEDGER_SEVENTEEN = frozenset(MUTANTS) | frozenset(GATED)
+# only two: that the three halves are pairwise disjoint, and that together they
+# number seventeen, so a name silently dropped from ALL of them is caught. It
+# does not compare the names against the ledger's -- that list lives in the plan
+# document, and copying it here would turn a rename into a bookkeeping failure
+# rather than leaving it a mutation one.
+LEDGER_SEVENTEEN = frozenset(MUTANTS) | frozenset(GATED) | frozenset(RETIRED)
 LEDGER_COUNT = 17
 
 # ---- blk/ublk.cpp ----
@@ -450,47 +454,22 @@ UBK_OWNER_LATE_MIGRATE = """            photon::thread_enable_join(th);
             migrate_to_pool(cfg.pool, th);
 """
 
-# The brace-less `if` plus its LOG_ERROR, deleted as one statement. q->home is still read
-# by the guard at the top of run_queue_teardown and by the thunk's own refusal check, so
-# deleting this does not orphan it and trips no unused-variable warning.
-#
-# What this mutant MEANS changed when the refusal guard went in, and the change is the
-# point: with no migration, queue_teardown_thunk finds itself on the creator's vcpu,
-# declines to run queue_teardown, and run_queue_teardown returns false -- so the queue is
-# left alive, stop_serving returns -1/EAGAIN, and detach()/shutdown() propagate it. The
-# mutant therefore no longer produces a silent cross-vcpu teardown that only a placement
-# oracle could catch; it produces a DETERMINISTIC refusal. Measured: it is killed by a
-# hang in UblkTest.pool_placement_n_less_than_m, because the queues it leaves alive are
-# coroutines on the pool's vcpus and ~WorkPool joins those vcpus' threads. The entry below
-# has the full booking and the two superseded pre-guard verdicts.
-UBK_TEARDOWN_HOP = """        if (photon::thread_migrate(th, q->home) < 0)
-            LOG_ERROR("ublk: cannot move the teardown of queue `, dev ` onto its own vcpu, so the teardown coroutine will refuse to run it, ", q->qid, dev_id, ERRNO());
-"""
-
 # ---- blk/tcmu.cpp ----
-# Only the call goes. The seven-line comment above it is shared with enable_join,
-# which this mutant does not touch, so deleting the comment would take the
-# rationale for a line that survives.
-TCM_PUMP_HOP = """        photon::thread_enable_join(pump_th);
-        migrate_to_pool(pool, pump_th);
-"""
-
-TCM_PUMP_NO_MIGRATE = """        photon::thread_enable_join(pump_th);
-"""
-
-# Brace-less `if` plus its LOG_ERROR, deleted as one statement. `home` is a member and is
-# still read by the conditional DEFER that clears it, by the guard above and by the thunk's
-# own refusal check, so no unused-variable hazard.
+# Only the call goes. The comment above it explains enable_join's ordering against
+# the migration, which this mutant removes; leaving it describes a hazard the
+# mutated code no longer has, and that reads oddly but is inert -- the same trade
+# UTILS_MIGRATE_GUARD below makes, and for the same reason: an anchor that embeds
+# prose rots the first time the prose is reworded.
 #
-# What this mutant MEANS changed when the refusal guard went in, exactly as for ublk's
-# `nohome`: with no migration the thunk finds itself on the creator's vcpu, declines to run
-# serve_stop, and run_serve_stop returns false -- so detach()/shutdown() propagate -1 and
-# do_shutdown() puts the removal id back instead of answering the kernel. Re-measured: it is
-# killed by a hang in TcmuTest.pool_placement_pump_off_the_caller_vcpu, which is NOT the case
-# the old booking named, and pool_serving_stop_under_load -- the one it did name -- never
-# reaches the point of running. The entry below has the measurement and the inverted verdict.
-TCM_STOP_HOP = """        if (photon::thread_migrate(th, home) < 0)
-            LOG_ERROR("tcmu: cannot move the teardown onto the serving vcpu, so the teardown coroutine will refuse to run it, ", ERRNO());
+# Re-pointed from the pump to the OWNER coroutine when serve_start started creating
+# the pump and the serve_stop thunk inside one migrated coroutine. What the mutation
+# means widened with it: it now leaves the stopper on the caller's vcpu too, which
+# is why this is the only tcmu mutant that can misplace a stop.
+TCM_OWNER_HOP = """        photon::thread_enable_join(th);
+        migrate_to_pool(pool, th);
+"""
+
+TCM_OWNER_NO_MIGRATE = """        photon::thread_enable_join(th);
 """
 
 # ---- blk/nbd.cpp ----
@@ -633,15 +612,9 @@ def mutate(mode, text):
     if mode == "lateMigrate":
         return sub_once(text, UBK_OWNER_HOP, UBK_OWNER_LATE_MIGRATE,
                         "ublk start_serving's migrate_to_pool")
-    if mode == "nohome":
-        return sub_once(text, UBK_TEARDOWN_HOP, "",
-                        "ublk run_queue_teardown's thread_migrate back to q->home")
     if mode == "tcmunomigrate":
-        return sub_once(text, TCM_PUMP_HOP, TCM_PUMP_NO_MIGRATE,
-                        "tcmu serve_start's migrate_to_pool")
-    if mode == "tcmunohome":
-        return sub_once(text, TCM_STOP_HOP, "",
-                        "tcmu run_serve_stop's thread_migrate back to home")
+        return sub_once(text, TCM_OWNER_HOP, TCM_OWNER_NO_MIGRATE,
+                        "tcmu serve_start's migrate_to_pool of the owner coroutine")
     if mode == "nbdnomigrate":
         return sub_once(text, NBD_CONN_HOP, NBD_CONN_NO_MIGRATE,
                         "nbd spawn_serve_conn's migrate_to_pool")
@@ -664,14 +637,17 @@ def check():
     This is the discipline the ledger's hand-sed runs did not have: an anchor that
     has drifted is found here, before a round is spent building a binary that was
     never mutated."""
-    both = frozenset(MUTANTS) & frozenset(GATED)
-    if both:
-        die("%s appear in both MUTANTS and GATED, so the split is not a split"
-            % sorted(both))
+    groups = (("MUTANTS", MUTANTS), ("GATED", GATED), ("RETIRED", RETIRED))
+    for i, (an, a) in enumerate(groups):
+        for bn, b in groups[i + 1:]:
+            both = frozenset(a) & frozenset(b)
+            if both:
+                die("%s appear in both %s and %s, so the split is not a split"
+                    % (sorted(both), an, bn))
     if len(LEDGER_SEVENTEEN) != LEDGER_COUNT:
-        die("MUTANTS and GATED name %d mutants between them, not the ledger's %d: "
-            "one was dropped from both halves, or the ledger has moved and "
-            "LEDGER_COUNT with it" % (len(LEDGER_SEVENTEEN), LEDGER_COUNT))
+        die("MUTANTS, GATED and RETIRED name %d mutants between them, not the "
+            "ledger's %d: one was dropped from all three, or the ledger has moved "
+            "and LEDGER_COUNT with it" % (len(LEDGER_SEVENTEEN), LEDGER_COUNT))
     for src in MUTANTS.values():
         if src not in SRCS:
             die("mutant targets %r, which SRCS does not know" % src)
@@ -700,8 +676,8 @@ def check():
         print("CHECK_OK %s %s" % (mode, src))
     if bad:
         die("%d of %d mutants failed the anchor check" % (bad, len(MUTANTS)))
-    print("CHECK_ALL_OK %d mutants, %d gated, nothing written"
-          % (len(MUTANTS), len(GATED)))
+    print("CHECK_ALL_OK %d mutants, %d gated, %d retired, nothing written"
+          % (len(MUTANTS), len(GATED), len(RETIRED)))
 
 
 def main():
@@ -768,6 +744,8 @@ def main():
 
     if mode in GATED:
         die("%s refused: %s" % (mode, GATED[mode]))
+    if mode in RETIRED:
+        die("%s retired: %s" % (mode, RETIRED[mode]))
     if mode not in MUTANTS:
         die("unknown mutation %r; the ledger's seventeen are %s"
             % (mode, "|".join(sorted(LEDGER_SEVENTEEN))))

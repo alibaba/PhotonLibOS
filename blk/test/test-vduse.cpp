@@ -1547,8 +1547,8 @@ TEST_F(VduseTest, basic_io) {
 // handler calls it -- Iotlb::clear() invalidates and flushes inside one critical
 // section, and invalidate() has no caller at all -- and the kernel sends that message
 // from exactly one place: vduse_dev_update_iotlb(), called only by
-// vduse_vdpa_set_map(), whose .set_map op only vhost-vdpa invokes (linux-7.2.3
-// drivers/vdpa/vdpa_user/vduse_dev.c:340 and :885, and the three ops->set_map sites
+// vduse_vdpa_set_map(), whose .set_map op only vhost-vdpa invokes (Linux v7.2.3: both
+// functions in drivers/vdpa/vdpa_user/vduse_dev.c, and the three ops->set_map sites
 // in drivers/vhost/vdpa.c; virtio_vdpa.c has none). This suite's consumer is
 // `vdpa dev add mgmtdev vduse`, i.e. the virtio_vdpa bus driver -- so no invalidation
 // arrives, `stale` stays empty, and neither the comparison against the budget nor the
@@ -1616,10 +1616,13 @@ TEST_F(VduseTest, teardown_releases_every_mapping_the_cache_retained) {
     EXPECT_GT(live, (uint64_t) 0);
     EXPECT_EQ((uint64_t) 0, vduse_iotlb_stale_bytes(dev));
     // The budget's calibration, measured instead of asserted in prose. One mapping of
-    // the kernel's bounce region is 64 MiB by default -- VDUSE_BOUNCE_SIZE at
-    // vduse_dev.c:47, undivided because nas is 1 for the api version 0 this transport
-    // sets (:2214, :2237), registered as ONE iotlb entry covering [0, bounce_size-1]
-    // at iova_domain.c:400 -- and any request carrying data resolves through it. So a
+    // the kernel's bounce region is 64 MiB by default -- VDUSE_BOUNCE_SIZE, which
+    // vduse_create_dev() in drivers/vdpa/vdpa_user/vduse_dev.c assigns to bounce_size
+    // -- undivided because the same function sets nas to 1 for an api_version below
+    // VDUSE_API_VERSION_1, which is the 0 this transport sets, and registered as ONE
+    // iotlb entry covering [0, bounce_size-1] by vduse_domain_init_bounce_map() in
+    // iova_domain.c. All of it Linux v7.2.3. Any request carrying data resolves
+    // through that entry, so a
     // device that has served one such request already holds at least the flush budget
     // LIVE, which is what makes the first invalidation of that region meet
     // `stale_bytes() >= VDUSE_STALE_FLUSH_BYTES` outright rather than creep towards

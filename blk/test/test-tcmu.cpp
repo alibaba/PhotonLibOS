@@ -1012,7 +1012,7 @@ TEST_F(TcmuTest, destroy_orphan_removes_a_dead_registration) {
     // Planted with NO HBA listening, for the reason the directory-tombstone case
     // below states in full: an `enable` makes the kernel multicast an ADDED, and
     // the listener's on_added() PROBES the tombstone it is told about -- tcmu.cpp
-    // calls devlock_free there, holding LOCK_EX while it does (utils.cpp:148). A
+    // calls devlock_free there, which holds LOCK_EX for as long as the probe runs. A
     // probe from this vcpu that overlaps it reads "a live server holds it", so
     // list_orphans() drops that entry -- which cost this case one of its two
     // records -- and destroy_orphan() answers EBUSY. new_tcmu_hba() returns only
@@ -1328,8 +1328,8 @@ TEST_F(TcmuTest, destroy_orphan_outlives_a_directory_tombstone) {
     // Enabled with NO HBA listening; the HBA comes up only afterwards. `echo 1 >
     // enable` makes the kernel multicast an ADDED, and the listener that receives
     // it PROBES the tombstone of the backstore it is told about before queueing
-    // the event (tcmu.cpp's on_added calls devlock_free) -- and a probe holds
-    // LOCK_EX for as long as it runs (utils.cpp:148). A probe of the same path
+    // the event (tcmu.cpp's on_added calls devlock_free) -- and that probe holds
+    // LOCK_EX for as long as it runs. A probe of the same path
     // from this vcpu that overlaps it reads "a live server holds it", which is
     // the flake this case had in both of its shapes: list_orphans() skips a held
     // entry silently, and destroy_orphan() refuses one with EBUSY. Both are the
@@ -1457,6 +1457,19 @@ TEST(tcmu_devlock, a_probe_and_a_claim_are_not_the_same_question) {
     // the harm: unlink by path under a live claimant, then claim the name again
     ASSERT_EQ(0, devlock_unlink(dir, NAME));
     EXPECT_EQ(-1, devlock_free(dir, NAME)) << "the unlinked tombstone is still visible to a scan";
+    // `fd` is now the stale half of a split inode, and this is the state the identity
+    // check exists for: it holds an exclusive flock that nothing can observe by name,
+    // because the name is gone. devlock_acquire must not hand such an fd back -- it
+    // retries instead -- and a caller that goes on to unlink the name would remove
+    // whoever's tombstone is there now. All three of the predicate's answers are
+    // reachable from here by hand, which is more than can be said for the interleaving
+    // inside devlock_acquire that produces them: that one sits between two syscalls
+    // with no yield in between, so what is pinned below is the question acquire asks
+    // and not the loop that asks it.
+    errno = 0;
+    EXPECT_EQ(-1, devlock_same_inode(fd, dir, NAME))
+        << "a claim on an unlinked inode read as inspectable";
+    EXPECT_EQ(ENOENT, errno) << "the name is gone, and that is the answer to report";
     int fd2 = -1;
     ASSERT_EQ(0, devlock_acquire(dir, NAME, &fd2))
         << "a second claim of the same name was refused while the first still held an unlinked inode";
@@ -1466,6 +1479,12 @@ TEST(tcmu_devlock, a_probe_and_a_claim_are_not_the_same_question) {
     ASSERT_EQ(0, ::fstat(fd2, &s2));
     EXPECT_TRUE(s1.st_ino != s2.st_ino)
         << "both claimants hold the same inode, so flock alone would have caught this";
+    // and the two claimants are on opposite sides of the predicate: the fresh one IS
+    // the name, the stale one is not it any more -- the mismatch devlock_acquire
+    // retries on rather than returning
+    EXPECT_EQ(1, devlock_same_inode(fd2, dir, NAME));
+    EXPECT_EQ(0, devlock_same_inode(fd, dir, NAME))
+        << "an unlinked inode still counted as the one the name resolves to";
     devlock_release(fd2);
     devlock_release(fd);
 

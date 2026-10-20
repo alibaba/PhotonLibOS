@@ -254,9 +254,9 @@ static uint64_t sysfs_u64(const std::string& path) {
 // counting writes proves nothing either.
 //
 // Both spellings are read because the name and the unit moved together: the kernels this
-// suite has run on expose write_zeroes_max_sectors in 512-byte units, and 7.2.3 exposes
-// write_zeroes_max_bytes already scaled (block/blk-sysfs.c:642 and its
-// QUEUE_SYSFS_LIMIT_SHOW_SECTORS_TO_BYTES).
+// suite has run on expose write_zeroes_max_sectors in 512-byte units, and Linux v7.2.3
+// exposes write_zeroes_max_bytes already scaled -- block/blk-sysfs.c binds that attribute
+// to queue_max_write_zeroes_sectors through QUEUE_SYSFS_LIMIT_SHOW_SECTORS_TO_BYTES.
 static uint64_t node_write_zeroes_bytes(const std::string& node) {
     std::string q = "/sys/block/" +
                     (node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node) + "/queue/";
@@ -662,8 +662,8 @@ TEST_F(UblkConfigTest, unimplemented_data_plane_flags_are_refused) {
     constexpr uint64_t SHMEM_ZC       = 1ULL << 19;
     // INTEGRITY (1 << 16) is absent from this list on purpose and is covered twice over:
     // it requires USER_COPY, which is refused, and the driver itself rejects it without
-    // USER_COPY (drivers/block/ublk_drv.c:4718), so there is no registration carrying it
-    // that this transport could be asked to serve.
+    // USER_COPY (ublk_ctrl_add_dev() in drivers/block/ublk_drv.c, Linux v7.2.3), so there
+    // is no registration carrying it that this transport could be asked to serve.
     const uint64_t refused[] = {
         NEED_GET_DATA, USER_COPY, ZONED, AUTO_BUF_REG, BATCH_IO, SHMEM_ZC,
         NEED_GET_DATA | USER_COPY,
@@ -690,8 +690,8 @@ TEST_F(UblkConfigTest, unimplemented_data_plane_flags_are_refused) {
     // means, so refusing them would only make a kernel feature this daemon has no opinion
     // about unusable through cfg.flags. BUF_REG_OFF_DAEMON is the pointed case -- it only
     // widens who may issue REGISTER_IO_BUF, a command this daemon never issues, and the
-    // driver force-sets it in the negotiated flags of EVERY device it creates
-    // (drivers/block/ublk_drv.c:4784), so putting it in the mask would refuse every
+    // driver force-sets it in the negotiated flags of EVERY device it creates -- the same
+    // ublk_ctrl_add_dev(), Linux v7.2.3 -- so putting it in the mask would refuse every
     // adoption on such a kernel rather than every unservable one. Whether the kernel
     // accepts a given COMBINATION of these is ADD_DEV's business, not validate()'s.
     constexpr uint64_t UNPRIVILEGED_DEV      = 1ULL << 5;
@@ -723,15 +723,15 @@ TEST_F(UblkConfigTest, unimplemented_data_plane_flags_are_refused) {
 
 // The descriptor-ring mapping geometry, table-tested over page sizes this host does not
 // have. Every assertion below is transcribed from the driver, which is the authority on
-// both numbers and the reason neither may be written with a 4096 in it:
+// both numbers and the reason neither may be written with a 4096 in it. Read out of
+// Linux v7.2.3; all four functions named are in drivers/block/ublk_drv.c:
 //   length   round_up(depth * sizeof(ublksrv_io_desc), PAGE_SIZE), which is what
-//            __ublk_queue_cmd_buf_size() computes (drivers/block/ublk_drv.c:1247) and what
-//            ublk_ch_mmap requires the mapping's length to EQUAL (:2663) -- not a multiple
-//            of, not at least.
+//            __ublk_queue_cmd_buf_size() computes and what ublk_ch_mmap() requires the
+//            mapping's length to EQUAL -- not a multiple of, not at least.
 //   offset   qid * round_up(UBLK_MAX_QUEUE_DEPTH * sizeof(desc), PAGE_SIZE), because
-//            ublk_ch_mmap recovers q_id by DIVIDING the offset by ublk_max_cmd_buf_size()
-//            (:2659, with UBLKSRV_CMD_BUF_OFFSET == 0) and that stride is
-//            __ublk_queue_cmd_buf_size(UBLK_MAX_QUEUE_DEPTH) (:1257).
+//            ublk_ch_mmap() recovers q_id by DIVIDING the offset by
+//            ublk_max_cmd_buf_size(), UBLKSRV_CMD_BUF_OFFSET being 0, and that stride is
+//            __ublk_queue_cmd_buf_size(UBLK_MAX_QUEUE_DEPTH).
 //   alignment  mmap(2) itself rejects an offset that is not a multiple of the page, which
 //            is where a 64 KiB host used to fail before the driver was ever reached:
 //            4096 * 24 = 98304 = 2^15 * 3 is page-aligned at 4 KiB and at 16 KiB and not
@@ -2583,9 +2583,9 @@ TEST_F(UblkTest, a_failed_write_through_persist_fails_the_write) {
 // that word was the only promise made.
 //
 // DISCARD is NOT here and that is not an omission either: Linux never attaches a durability
-// ask to a discard (blk_alloc_discard_bio allocates REQ_OP_DISCARD with neither flag,
-// block/blk-lib.c:37-46), so a discard's completion has never been a durability promise and
-// there is nothing for write_through to make true. serve_req says the same at its own case.
+// ask to a discard (blk_alloc_discard_bio() in block/blk-lib.c allocates REQ_OP_DISCARD with
+// neither flag; Linux v7.2.3), so a discard's completion has never been a durability promise
+// and there is nothing for write_through to make true. serve_req says the same at its own case.
 //
 // Same control/experiment/failure shape as the write trio, and the same reason for it: without
 // the control an unconditional sync passes all three, and an unconditional sync is the exact

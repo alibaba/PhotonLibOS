@@ -115,24 +115,71 @@ int validate_scope_dir(const char* dir, const char* what) {
     return 0;
 }
 
+// flock attaches to the open file DESCRIPTION, not to the name, so a descriptor
+// opened before somebody unlinked the tombstone still locks -- an inode no path
+// reaches any more. Answering "held" about such an fd is what let a caller go on to
+// unlink the NAME and thereby remove a DIFFERENT process's tombstone, so the question
+// is asked of every claim rather than left to whoever wanted the lock.
+// 1 = the fd and the name are one inode, 0 = they are not, -1 = the fd or the name
+// could not be inspected at all (errno says which; ENOENT is the routine shape of a
+// name that is simply gone, and is not logged as an error).
+int devlock_same_inode(int fd, const char* dir, const char* name) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    struct stat by_fd, by_name;
+    if (::fstat(fd, &by_fd) != 0)
+        LOG_ERRNO_RETURN(0, -1, "fstat on a claimed tombstone failed");
+    if (::stat(path, &by_name) != 0) {
+        if (errno == ENOENT)
+            return -1;
+        LOG_ERRNO_RETURN(0, -1, "stat on the tombstone path ` failed", path);
+    }
+    return (by_fd.st_dev == by_name.st_dev && by_fd.st_ino == by_name.st_ino) ? 1 : 0;
+}
+
+// How many times devlock_acquire re-takes a name that kept moving under it. Every
+// caller that moves one does so once -- destroy_orphan unlinks, rollback unlinks --
+// so this is not a policy so much as a refusal to spin forever against a peer that
+// never stops. EBUSY is the answer because it is the one every caller already has
+// words for: somebody else has this identity.
+static constexpr int DEVLOCK_ACQUIRE_TRIES = 16;
+
 int devlock_acquire(const char* dir, const char* name, int* fd_out) {
     if (::mkdir(dir, 0755) != 0 && errno != EEXIST)
         LOG_ERRNO_RETURN(0, -1, "failed to create lock dir ", dir);
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", dir, name);
-    int fd = ::open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd < 0)
-        LOG_ERRNO_RETURN(0, -1, "failed to open lock file ", path);
-    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        int e = (errno == EWOULDBLOCK) ? EBUSY : errno;
+    for (int tries = 0; ; tries++) {
+        int fd = ::open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        if (fd < 0)
+            LOG_ERRNO_RETURN(0, -1, "failed to open lock file ", path);
+        if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+            int e = (errno == EWOULDBLOCK) ? EBUSY : errno;
+            ::close(fd);
+            if (e != EBUSY)
+                LOG_ERROR("flock on ` failed, ", path, ERRNO());
+            errno = e;
+            return -1;
+        }
+        int same = devlock_same_inode(fd, dir, name);
+        if (same == 1) {
+            *fd_out = fd;
+            return 0;
+        }
+        // The lock is genuine but it is not a lock ON THE NAME: the node was unlinked
+        // between the open and the check, or replaced, so what is held is an inode the
+        // path no longer resolves to. Drop it and take the name again, which lands
+        // either on the inode that replaced it -- where the replacement's own claim
+        // answers EBUSY -- or on a fresh one nobody else can be holding.
+        int e = errno;   // close() below would clobber what devlock_same_inode left
         ::close(fd);
-        if (e != EBUSY)
-            LOG_ERROR("flock on ` failed, ", path, ERRNO());
-        errno = e;
-        return -1;
+        if (same < 0 && e != ENOENT) {
+            errno = e;
+            return -1;   // devlock_same_inode logged it
+        }
+        if (tries + 1 >= DEVLOCK_ACQUIRE_TRIES)
+            LOG_ERROR_RETURN(EBUSY, -1, "the tombstone ` kept changing inode under the claim, so something is contesting the name; giving up", path);
     }
-    *fd_out = fd;
-    return 0;
 }
 
 void devlock_release(int fd) {

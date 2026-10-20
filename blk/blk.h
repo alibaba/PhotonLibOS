@@ -219,33 +219,37 @@ struct BlkDevInfo {
 // device's lifecycle calls -- start(), and the detach(), shutdown() and resize()
 // that follow it -- must all be issued from one and the same photon vcpu, this
 // device's control vcpu, which is normally the caller's own. Nothing in a device
-// detects a breach, and the failure is not a clean one: every transport keeps part
-// of its control plane in fields that are plain precisely because only that one
-// vcpu writes them. Where a transport pins the vcpu its serving coroutines run on,
-// so that teardown can hop onto it, the pin is such a field and start() wrote it --
-// so a teardown issued elsewhere reads and clears it from a second OS thread with
-// nothing ordering the two. resize() belongs to the set for the same reason:
-// vhost-user's writes the config bytes its own message loop answers a GET_CONFIG
-// from, and ublk's submits on an io_uring whose submission side is not thread-safe.
+// detects a breach, and the failure is not a clean one: every transport keeps its
+// control plane in fields that are plain precisely because only that one vcpu writes
+// them -- whether it is serving, its registration id, its lock fd, its queue list.
+// vhost-user and vduse also record the vcpu their serving coroutines landed on, so
+// that teardown can hop onto it, and that record is written by a start and cleared by
+// a teardown: issuing the two from different vcpus reads and clears it from a second
+// OS thread with nothing ordering them. resize() belongs to the set for the same
+// reason: vhost-user's writes the config bytes its own message loop answers a
+// GET_CONFIG from, and ublk's submits on an io_uring whose submission side is not
+// thread-safe.
 //
 // What this binds is where those calls are ISSUED, not where the work RUNS.
-// BlkConfig::pool moves the serving coroutines onto other vcpus, and teardown hops
-// onto the serving vcpu to stop them there -- that is the point of a pool. Nor does
+// BlkConfig::pool moves the serving coroutines onto other vcpus, and teardown runs
+// on the serving vcpu to stop them there -- that is the point of a pool. Nor does
 // it mean a device has only one vcpu in its life: tcmu's HBA answers kernel events
 // on a listener vcpu of its own, and whatever that costs is paid inside tcmu rather
 // than by this contract.
 //
-// That hop is best-effort, and it REFUSES rather than races. photon moves only a
-// thread that is READY and already on the caller's vcpu, and creating the coroutine
-// to move can fail on its own, so a teardown that cannot reach the serving vcpu
-// leaves the queue or device ALIVE -- ring mapped, serving coroutines running -- and
-// answers -1, instead of tearing down across vcpus, which is the race the hop exists
-// to avoid. This leaks by design, and the leak outlives the device: the survivors
-// are coroutines on the pool's vcpus, a vcpu does not shut down while one is left on
-// it, and ~WorkPool joins its worker threads -- so a pool holding a refused queue
-// never finishes being destroyed. What a caller gets for that is a retry: the object
-// is still there, still consistent, and a later teardown issued from the control
-// vcpu can still succeed.
+// Getting the teardown ONTO the serving vcpu is the transport's problem, not the
+// caller's, and what this contract promises is the part a caller can act on: no
+// transport refuses a teardown because of placement, and none leaves serving
+// coroutines behind on one. ublk and tcmu create the coroutine that will run theirs
+// at START time, on the vcpu the serving coroutines land on, so a teardown only wakes
+// it and joins it -- with no allocation and no migration left to do there is nothing
+// that can be refused, and the join is what makes it safe to free the queue, unmap
+// the ring and delete the backend afterwards. vhost-user and vduse still allocate a
+// coroutine per hop; when they cannot honour the placement they run the work where
+// the caller is and log it, rather than leaving a queue up or handing back a failure.
+// detach() and shutdown() do answer -1, for the reasons their own documents name --
+// a device an initiator still holds, a registration the kernel will not remove --
+// and never for this one.
 //
 // Identity and geometry are FIXED AT CONSTRUCTION: every new_xxx_device() takes
 // its transport's config and validates it, so a constructed object is always

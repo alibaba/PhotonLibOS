@@ -354,13 +354,13 @@ SET_VRING_BASE cursor:
                     #
                     # Three of the five are reconnect cases, and they fail on a ~22 s
                     # frontend timeout rather than on a cursor assertion, so the wall time
-                    # is the tell and rc alone does not explain it. frontend_reconnect
-                    # (:2242) and a_reconnect_that_declines_the_feature_stops_walking_tables
-                    # (:6106) each log `used ring: Connection timed out`, the first with its
+                    # is the tell and rc alone does not explain it. frontend_reconnect and
+                    # a_reconnect_that_declines_the_feature_stops_walking_tables each log
+                    # `used ring: Connection timed out`, the first with its
                     # frontend lambda returning EIO and the second with do_request's return
                     # reading -1 where the 0xff sentinel was expected.
                     # a_truncated_mem_table_ends_the_session_and_a_reconnect_still_serves
-                    # (:4454) takes the same 22.6 s and returns EIO=5 where 0 was expected.
+                    # takes the same 22.6 s and returns EIO=5 where 0 was expected.
                     # None of the three calls restart_with_base; what they share is a second
                     # negotiate(), and negotiate() sends SET_VRING_BASE(0) like any
                     # conformant setup does. That 0 is the only thing that clears the dead
@@ -373,11 +373,12 @@ SET_VRING_BASE cursor:
                     # dispatches it, and the case's read never completes.
                     #
                     # The other two fail on the cursor. event_idx_wrap reads avail_event in
-                    # the hundreds where it expects 65535 (:4852), then its next write_dev
-                    # returns -1 (:4849) with `used elem id: Protocol error`.
+                    # the hundreds where it expects 65535, then its next write_dev
+                    # returns -1 with `used elem id: Protocol error`.
                     # adopt_keeps_a_full_ring_cursor_and_snaps_one_entry_past_it fails both
-                    # halves (:5815 reads 7 where it expects 5 + VQ_NUM, :5829 reads 266
-                    # where it expects 5). Do NOT turn those into expected values: they are
+                    # halves -- the first cursor read gives 7 where the case expects
+                    # 5 + VQ_NUM, the second 266 where it expects 5. Do NOT turn those into
+                    # expected values: they are
                     # whatever the loop had got to when the case looked, and event_idx_wrap
                     # read 259 in a two-case run and 262 in the full one. The assertion is
                     # "not the planted cursor", and only that is stable.

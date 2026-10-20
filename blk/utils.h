@@ -40,6 +40,9 @@ limitations under the License.
 // Byte order: netlink integers are host byte order; the virtio wire structs are
 // little-endian (VIRTIO_F_VERSION_1 is always offered) and assume an LE host,
 // the same contract as the rest of blk/.
+//
+// Kernel citations here name a symbol rather than a line number, which moves
+// without the fact moving, and were read against Linux v7.2.3.
 
 #include "blk.h"
 
@@ -97,7 +100,26 @@ int zero_fill(fs::IFile* backend, uint64_t off, uint64_t len);
 // EBUSY is the ROUTINE "another live server holds this identity" answer and is
 // deliberately not logged here: every caller reports it with its own context
 // (the device identity, or a silent skip in the passive handler's scan).
+//
+// What the returned fd is guaranteed to hold is the inode AT THE NAME, not merely an
+// inode: the lock is verified against the path before it is handed back and re-taken
+// if they came apart, which is what lets a caller go on to unlink the name and know it
+// removed its own tombstone. That inference also needs the claim still held across the
+// unlink, which every devlock_unlink() call site in blk does except one: tcmu's
+// destroy_orphan can reach it unclaimed, but only when the path is a directory, and
+// unlink refuses a directory rather than removing it. EBUSY is also the answer when
+// the name keeps moving and the retries run out, logged here with the reason.
 int devlock_acquire(const char* dir, const char* name, int* fd_out);
+
+// Is the inode `fd` holds the one `dir`/`name` currently resolves to? 1 = yes,
+// 0 = no, -1 = one of the two could not be inspected (errno says which; ENOENT is the
+// routine shape of a name that is simply gone, and is not logged). flock attaches to
+// the open file DESCRIPTION rather than to the name, so an fd opened before somebody
+// unlinked the tombstone still locks -- an inode no path reaches any more -- and this
+// is the only question that tells the two apart. devlock_acquire asks it itself; it is
+// separate because the split state it answers for is constructible by hand while the
+// interleaving inside devlock_acquire that produces it is not.
+int devlock_same_inode(int fd, const char* dir, const char* name);
 
 // Release (and close) a lock fd. The FILE stays: it is the tombstone the orphan
 // scans look for, and a later daemon re-locks it by name.
@@ -567,13 +589,15 @@ struct vring_used {
 // virtio 1.2 §2.7.7.2 / §2.7.10.1: with this negotiated, both sides ignore the
 // low bit of their ring's flags and suppress notifications by index instead --
 // the driver publishes used_event at the END of the avail ring, we publish
-// avail_event at the END of the used ring (<linux/virtio_ring.h>:82-85, :193-194).
+// avail_event at the END of the used ring (the comment on VIRTIO_RING_F_EVENT_IDX
+// in <linux/virtio_ring.h>, and its vring_used_event / vring_avail_event macros).
 #define VIRTIO_RING_F_EVENT_IDX 29
 
 // virtio 1.2 §2.7.5.3: one descriptor in the ring names an array of descriptors
 // elsewhere in guest memory, so a request takes one ring slot but carries many
-// buffers (<linux/virtio_ring.h>:78; the flag it sets on that descriptor is
-// VRING_DESC_F_INDIRECT, :42). Cited by line rather than included: that header's
+// buffers (VIRTIO_RING_F_INDIRECT_DESC in <linux/virtio_ring.h>; the flag it sets
+// on that descriptor is VRING_DESC_F_INDIRECT, and the descriptor itself is
+// struct vring_desc). Cited by symbol rather than included: that header's
 // inline vring_init() assigns void* to typed pointers, which C++ rejects, and that
 // is why this file copies the structs above verbatim instead.
 #define VIRTIO_RING_F_INDIRECT_DESC 28
@@ -767,8 +791,9 @@ bool vring_need_irq(const vring_avail* avail);        // !AVAIL_F_NO_INTERRUPT
 uint16_t vring_used_append(vring_used* used, uint16_t used_idx, uint32_t num,
                            uint16_t id, uint32_t len);
 
-// ---- event index (VIRTIO_RING_F_EVENT_IDX), verbatim from
-// ---- <linux/virtio_ring.h>:193-194 and :219-227 ----
+// ---- event index (VIRTIO_RING_F_EVENT_IDX), verbatim from the
+// ---- vring_used_event / vring_avail_event macros and vring_need_event() in
+// ---- <linux/virtio_ring.h> ----
 
 // used_event: the used index at which the driver wants its next interrupt. It
 // lives in the uint16 slot right past the avail ring's `num` entries, which is
