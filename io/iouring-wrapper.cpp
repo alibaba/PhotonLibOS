@@ -381,25 +381,10 @@ public:
         return num;
     }
 
-<<<<<<< HEAD
-    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
-        // Prepare own timeout
-        __kernel_timespec ts{};
-        if (timeout > std::numeric_limits<int64_t>::max()) {
-            timeout = std::numeric_limits<int64_t>::max();
-        }
-        usec_to_timespec(timeout, &ts);
-
-        io_uring_cqe* cqe = nullptr;
-        if (m_submit_wait_func(m_ring, &ts, &cqe) != 0) {
-            return -1;
-        }
-
-=======
     int reap_events() {
->>>>>>> e1c3c08 ([Backport][0.9 to 0.8] | fix(io): io_uring completion draining and SQE reset fixes (#1671, #1696) (#1693, #1701) (#1704))
         uint32_t head = 0;
         unsigned i = 0;
+        io_uring_cqe* cqe;
         io_uring_for_each_cqe(m_ring, head, cqe) {
             i++;
             auto ctx = (ioCtx*) io_uring_cqe_get_data(cqe);
@@ -456,14 +441,16 @@ public:
         return 0;
     }
 
-    ssize_t wait_and_fire_events(uint64_t timeout) override {
+    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
         // Prepare own timeout
-        if (timeout > (uint64_t)std::numeric_limits<int64_t>::max()) {
+        __kernel_timespec ts{};
+        if (timeout > std::numeric_limits<int64_t>::max()) {
             timeout = std::numeric_limits<int64_t>::max();
         }
+        usec_to_timespec(timeout, &ts);
 
-        auto ts = usec_to_timespec(timeout);
-        if (m_submit_wait_func(m_ring, &ts) != 0) {
+        io_uring_cqe* cqe = nullptr;
+        if (m_submit_wait_func(m_ring, &ts, &cqe) != 0) {
             return -1;
         }
 

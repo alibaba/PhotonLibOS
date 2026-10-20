@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdlib>
 #include <fcntl.h>
 #include <unordered_map>
+#include <algorithm>
 
 #include <gtest/gtest.h>
 #include <gflags/gflags.h>
@@ -702,7 +703,7 @@ static void interrupted_completion_order(const unsigned* order, unsigned count,
     auto waiter = photon::thread_create11([&] {
         auto sqe = fixture.engine._get_sqe();
         io_uring_prep_nop(sqe);
-        auto timeout = timed ? photon::Timeout(1000000) : photon::Timeout();
+        uint64_t timeout = timed ? 1000000 : -1;
         result = fixture.engine._async_io(sqe, timeout, 0);
         error = errno;
         returned = true;
@@ -889,7 +890,7 @@ TEST(iouring_completion, normal_untimed_completion) {
         auto waiter = photon::thread_create11([&] {
             auto sqe = fixture.engine._get_sqe();
             io_uring_prep_poll_add(sqe, 0, POLLIN);
-            result = fixture.engine._async_io(sqe, photon::Timeout(), 0);
+            result = fixture.engine._async_io(sqe, -1, 0);
             error = errno;
             returned = true;
         });
