@@ -40,6 +40,7 @@ limitations under the License.
     ((type*)((char*)static_cast<const decltype(((type*)0)->member)*>(ptr) - offsetof(type,member)))
 
 namespace photon {
+namespace {
 
 constexpr static EventsMap<EVUnderlay<POLLIN | POLLRDHUP, POLLOUT, POLLERR>> evmap;
 
@@ -203,8 +204,10 @@ public:
             if (sqe == nullptr) {
                 // The first SQE is already in the SQ ring and will be submitted
                 // sooner or later. Turn it into a harmless NOP without user data
-                // (prep_rw clears sqe->flags, including IOSQE_IO_LINK), so that
-                // its CQE won't reference the stack contexts after we return.
+                // so its CQE won't reference the stack contexts after return.
+                // Newer liburing prep helpers do not clear flags or other
+                // operation-specific state when reusing an acquired SQE.
+                *first_sqe = {};
                 io_uring_prep_nop(first_sqe);
                 io_uring_sqe_set_data(first_sqe, nullptr);
                 return -1;      // errno was set to EBUSY by _get_sqe
@@ -213,7 +216,14 @@ public:
             io_uring_sqe_set_data(sqe, &timer_ctx);
         }
 
-        photon::thread_sleep(-1);
+        // Normal completion also drains both stack contexts: the timeout can
+        // arrive before the I/O it cancels, or after a successful I/O. Wake
+        // for every final CQE so either order can finish the wait below.
+        io_ctx.draining = timer_ctx.draining = true;
+        do {
+            photon::thread_sleep(-1);
+        } while (errno == EOK &&
+                 (!io_ctx.done || (has_timer && !timer_ctx.done)));
 
         if (likely(errno == EOK)) {
             // Interrupted by `wait_and_fire_events`
@@ -246,6 +256,7 @@ public:
                 return -1;
             }
             ioCtx cancel_ctx(true, false);
+            cancel_ctx.draining = true;
             io_uring_prep_cancel(sqe, &io_ctx, 0);
             io_uring_sqe_set_data(sqe, &cancel_ctx);
             // No explicit submit here: this engine submits lazily, from
@@ -371,17 +382,7 @@ public:
         return num;
     }
 
-    ssize_t wait_and_fire_events(uint64_t timeout) override {
-        // Prepare own timeout
-        if (timeout > (uint64_t)std::numeric_limits<int64_t>::max()) {
-            timeout = std::numeric_limits<int64_t>::max();
-        }
-
-        auto ts = usec_to_timespec(timeout);
-        if (m_submit_wait_func(m_ring, &ts) != 0) {
-            return -1;
-        }
-
+    int reap_events() {
         uint32_t head = 0;
         unsigned i = 0;
         io_uring_cqe* cqe;
@@ -424,12 +425,12 @@ public:
                 // 2. IORING_OP_POLL_REMOVE. The I/O is actually a polling.
                 // 3. IORING_OP_ASYNC_CANCEL. This OP is the superset of case 2.
                 ctx->res = -ETIMEDOUT;
-                continue;
+                if (!ctx->draining) continue;
             } else if (ctx->is_canceller && ctx->res == -ECANCELED) {
                 // The linked timer itself is also a canceller. The reasons it got cancelled could be:
                 // 1. I/O finished in time
                 // 2. I/O was cancelled by IORING_OP_ASYNC_CANCEL
-                continue;
+                if (!ctx->draining) continue;
             } else if (cqe->flags & IORING_CQE_F_MORE) {
                 continue;
             }
@@ -439,6 +440,20 @@ public:
 
         io_uring_cq_advance(m_ring, i);
         return 0;
+    }
+
+    ssize_t wait_and_fire_events(uint64_t timeout) override {
+        // Prepare own timeout
+        if (timeout > (uint64_t)std::numeric_limits<int64_t>::max()) {
+            timeout = std::numeric_limits<int64_t>::max();
+        }
+
+        auto ts = usec_to_timespec(timeout);
+        if (m_submit_wait_func(m_ring, &ts) != 0) {
+            return -1;
+        }
+
+        return reap_events();
     }
 
     int cancel_wait() override {
@@ -472,7 +487,7 @@ public:
         return 0;
     }
 
-private:
+public:
     struct ioCtx {
         ioCtx(bool canceller, bool event) : is_canceller(canceller), is_event(event) {}
         photon::thread* th_id = photon::CURRENT;
@@ -484,6 +499,8 @@ private:
         // before this flag turns true. No atomic needed, since a vCPU is
         // single OS thread and work stealing is paused during the wait.
         bool done = false;
+        // A waiter draining stack contexts needs every final CQE to wake it.
+        bool draining = false;
     };
 
     struct eventCtx {
@@ -615,6 +632,9 @@ int iouringEngine::m_cooperative_task_flag = -1;
 
 iouringEngine::SubmitWaitFunc iouringEngine::m_submit_wait_func = nullptr;
 
+} // namespace
+
+#ifndef PHOTON_IOURING_TEST_ENGINE_ONLY
 template<typename...Ts>
 inline size_t do_async_io(Ts...xs) {
     auto mee = (iouringEngine*) get_vcpu()->master_event_engine;
@@ -732,5 +752,6 @@ MasterEventEngine* new_iouring_master_engine() {
 CascadingEventEngine* new_iouring_cascading_engine() {
     return new_iouring(false);
 }
+#endif
 
 }
