@@ -17,11 +17,15 @@ on:
 jobs:
   arm-linux-build-and-test:
     if: ${{ !github.event.pull_request.draft }}
+<<<<<<< HEAD
     runs-on: ubuntu-24.04-arm
 
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
       options: --cpus 4
+=======
+    runs-on: arc-runner-set-arm
+>>>>>>> 4533491 ([Backport][0.8 to 0.7] | | ci: complete ARC runner migration (#1675) (#1679) (#1689))
 
     steps:
       - uses: szenius/set-timezone@v1.2
