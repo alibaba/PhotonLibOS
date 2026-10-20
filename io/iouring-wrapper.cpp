@@ -376,21 +376,7 @@ public:
         return num;
     }
 
-<<<<<<< HEAD
-    ssize_t wait_and_fire_events(uint64_t timeout) override {
-        // Prepare own timeout
-        if (timeout > (uint64_t)std::numeric_limits<int64_t>::max()) {
-            timeout = std::numeric_limits<int64_t>::max();
-        }
-
-        auto ts = usec_to_timespec(timeout);
-        if (m_submit_wait_func(m_ring, &ts) != 0) {
-            return -1;
-        }
-
-=======
     int reap_events() {
->>>>>>> 40701db ([Backport][main to 0.9] | fix(io): wake io_uring cancellation drains on final CQEs (#1671) (#1693))
         uint32_t head = 0;
         unsigned i = 0;
         io_uring_cqe* cqe;
@@ -452,7 +438,7 @@ public:
 
     ssize_t wait_and_fire_events(uint64_t timeout) override {
         // Prepare own timeout
-        if (timeout > (uint64_t) std::numeric_limits<int64_t>::max()) {
+        if (timeout > (uint64_t)std::numeric_limits<int64_t>::max()) {
             timeout = std::numeric_limits<int64_t>::max();
         }
 
@@ -752,7 +738,6 @@ static iouringEngine* new_iouring(bool is_master) {
     LOG_INFO("Init event engine: iouring ", VALUE(is_master));
     return NewObj<iouringEngine>(is_master) -> init();
 }
-<<<<<<< HEAD
 
 MasterEventEngine* new_iouring_master_engine() {
     return new_iouring(true);
@@ -761,8 +746,6 @@ MasterEventEngine* new_iouring_master_engine() {
 CascadingEventEngine* new_iouring_cascading_engine() {
     return new_iouring(false);
 }
-=======
 #endif
->>>>>>> 40701db ([Backport][main to 0.9] | fix(io): wake io_uring cancellation drains on final CQEs (#1671) (#1693))
 
 }

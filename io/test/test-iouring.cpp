@@ -629,7 +629,7 @@ namespace {
 
 struct CompletionRing {
     static constexpr unsigned CAPACITY = 8;
-    photon::iouringEngine engine;
+    photon::iouringEngine engine{false};
     io_uring ring{};
     io_uring_sqe sqes[CAPACITY]{};
     io_uring_cqe cqes[CAPACITY]{};
