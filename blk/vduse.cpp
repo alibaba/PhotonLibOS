@@ -806,57 +806,40 @@ struct VduseDeviceImpl : IBlkDevice {
                     return true;
             return false;
         }
-        // The vcpu this queue's loop coroutine runs on, recorded by vq_start
-        // immediately after the migration: photon::get_vcpu(thread*) reads the field
-        // do_thread_migrate stores under the thread's own lock before it returns, so
-        // the migrator already holds the answer. That is why no completion handshake
-        // belongs here -- a semaphore exists to tell a waiter that some work
-        // finished, and no work has to finish for this value to be known. An
-        // accepted migration leaves nothing between the create and this read that
-        // yields (thread_create only queues the new coroutine, thread_migrate does
-        // not switch for a thread that is not the caller, get_vcpu is an inline
-        // field read), so no other coroutine on this vcpu can catch the loop
-        // created while `home` is still null. That a null means "no loop to race"
-        // is the direction run_on_home's !home branch rests on, and the only one
-        // that holds: the converse has a window, because vq_stop_here nulls `th` on
-        // the serving vcpu inside the hop while vq_stop nulls `home` here only after
-        // that hop returns, and this vcpu yields while it waits for it. A refused
-        // migration needs no handling either, though it is not yield-free --
-        // thread_migrate logs every refusal and migrate_to_pool warns behind it, so
-        // a caller-installed sink writing through a photon IFile does yield in here.
-        // The value is still right: do_thread_migrate leaves the field untouched
-        // when it says no, and what it left is this vcpu, which is where the loop
-        // then really runs -- so a reader that sees the null sits on the loop's own
-        // vcpu instead of racing it. With cfg.pool null it is simply the caller's
-        // own vcpu.
+        // The coroutine that runs this queue's queue-side work, on the vcpu the
+        // serving loop runs on, plus the three fields work is handed through.
+        // vq_start creates it and publishes it here BEFORE the loop exists, which is
+        // what makes "no worker" mean "no loop anywhere" rather than "no loop yet";
+        // retire_workers() is the only clearer and runs after msg_loop is joined.
+        // Every write to the field is on the control vcpu, so nothing here needs the
+        // ordering a plain pointer written by one OS thread and read by another
+        // would.
         //
-        // Teardown moves its work there, because the loop and the request coroutines
-        // it spawned share it and are the only writers of last_avail, used_idx and
-        // the used ring WHILE THE LOOP IS LIVE -- and because the backlog wait
-        // dereferences `avail`, which a reclamation flush is what munmaps. Being on
-        // home is necessary for the first reason and not sufficient for the second:
-        // under a pool another vcpu's tick can be the flusher, which is why that
-        // dereference takes the reading protection -- see vq_backlog_drain.
+        // Pre-created rather than created per hop, and that is the fix rather than
+        // its documentation. A hop that allocated had two ways to fail --
+        // thread_create answers ENOMEM, and thread_migrate refuses a thread that is
+        // not READY -- and the only place left to put the body was HERE, on the
+        // control vcpu, with the loop and its request coroutines live on another OS
+        // thread. The bodies do not tolerate that. backlog_pending snapshots the
+        // reading bit on the assumption that it is the only vcpu touching it, so
+        // running it here clears a protection a home-side dispatch is standing on,
+        // which is precisely what lets reclaim_eligible answer true and munmap a
+        // ring under that dispatch; and both the backlog wait and GET_VQ_STATE read
+        // the plain uint16_t last_avail that dispatch_avail writes on home. Moving
+        // the allocation to start turns both into a failed start, which unwinds
+        // through start()'s DEFER, instead of a race nothing can report.
         //
-        // Control-plane field: written by vq_start, read by the three teardown
-        // callers and by msg_loop's answer to the kernel's vq state read. All of
-        // those readers run on the control vcpu blk.h's IBlkDevice names, and `home`
-        // is a plain pointer nothing here would notice a breach of: vq_start writes
-        // it on the vcpu that called start(), while a caller on another one both
-        // reads it and nulls it -- two OS threads, one field, nothing ordering them.
-        // msg_loop honours the contract because start() creates it there and
-        // deliberately never migrates it. The loop's own vcpu never touches it.
-        // vq_stop clears it once the loop is joined, so the drain that follows
-        // runs in place -- which it may, because drain() polls nothing but the
-        // atomic in_flight and therefore has no vcpu it must be on.
-        //
-        // Work stealing is what would break it: photon writes the field again only in
-        // its two stealing scans, and those need a per-thread create flag and a
-        // per-vcpu init flag that nothing in blk passes. Turned on, `home` would go
-        // stale within the coroutine's life -- but so would the design that gives
-        // each queue one serving vcpu, since a stolen loop moves away from the
-        // request coroutines that inherit its vcpu.
-        photon::vcpu_base* home = nullptr;
+        // Work stealing is what would break this, as it would the design that gives
+        // each queue one serving vcpu: photon moves a thread only in its two
+        // stealing scans, and those need a per-thread create flag and a per-vcpu
+        // init flag that nothing in blk passes.
+        photon::thread* worker = nullptr;
+        TempDelegate<void> body;      // the work the control plane handed it
+        // One handoff at a time, and vduse needs this where vhost-user does not --
+        // see run_on_home for the two coroutines that can be in there at once.
+        photon::mutex handoff;
+        photon::semaphore go{0};      // NSDMI, not {}: semaphore's ctor is explicit
+        photon::semaphore done{0};
     };
     struct Vq {
         VduseDeviceImpl* impl = nullptr;
@@ -1230,7 +1213,7 @@ struct VduseDeviceImpl : IBlkDevice {
             // out at msg_timeout. (vhost-user's GET_VRING_BASE does quiesce, but
             // that message's own protocol meaning is "stop this vq and return it".)
             uint16_t last_avail = 0;
-            run_on_home(vqs[idx]->x.home, [&] { last_avail = vqs[idx]->srv.last_avail; });
+            run_on_home(vqs[idx], [&] { last_avail = vqs[idx]->srv.last_avail; });
             LOG_DEBUG("vduse ` GET_VQ_STATE vq`, last_avail `", name, idx, last_avail);
             reply(req->request_id, VDUSE_REQ_RESULT_OK, idx, last_avail);
             break;
@@ -1867,74 +1850,125 @@ struct VduseDeviceImpl : IBlkDevice {
 
     // ---- running queue-side work where the queue lives ----
     //
-    // The loop coroutine and every request coroutine it spawned run on `home`,
-    // which is a pool vcpu once BlkConfig::pool is set. Four things have to join
-    // them there instead of running here on the control plane's vcpu: interrupting
-    // and joining the loop, waiting out the requests it dispatched, the backlog
-    // wait that reads last_avail and dereferences `avail` while counting on the
-    // loop to keep advancing the former, and answering the kernel's vq state read,
-    // which reports that same last_avail. photon::thread_migrate only accepts a
-    // READY thread, so a caller cannot move itself -- hand the work to a coroutine
-    // that can be moved.
+    // The loop coroutine and every request coroutine it spawned run on the vcpu
+    // migrate_to_pool landed them on, which BlkConfig::pool can make another OS
+    // thread. Four things have to join them there instead of running here on the
+    // control plane's vcpu: interrupting and joining the loop, waiting out the
+    // requests it dispatched, the backlog wait that reads last_avail and
+    // dereferences `avail` while counting on the loop to keep advancing the former,
+    // and answering the kernel's vq state read, which reports that same last_avail.
     //
-    // The TempDelegate and everything it captures outlive the call for the same
-    // reason run_off_vcpu's do: the caller blocks on `done` and then joins.
-    struct HomeArg {
-        TempDelegate<void> body;
-        photon::vcpu_base* home = nullptr;
-        photon::semaphore done{0};   // NSDMI, not {}: semaphore's ctor is explicit
-    };
+    // The coroutine that runs them is created by vq_start, already on that vcpu, and
+    // this only wakes it. photon::thread_migrate accepts just a READY thread so a
+    // caller cannot move itself, and a caller that created something to move instead
+    // would have two ways to fail with nowhere left to put the body but here -- see
+    // `worker`'s declaration for what the bodies make of that.
+    //
+    // `body` and the delegate it holds outlive the handoff for the same reason
+    // run_off_vcpu's do: the caller blocks on `done` before it returns. Publishing
+    // the field ahead of go.signal(1) and reading it after go.wait(1) needs no fence
+    // of its own -- semaphore::signal adds to m_count with a seq_cst fetch_add and
+    // try_subtract takes it with a seq_cst compare_exchange, so both sides order on
+    // that one object and the write happens-before the read. The same pair covers
+    // `done` in the other direction, which is what makes the caller's read of
+    // whatever the body wrote safe.
+    void run_on_home(Vq* q, TempDelegate<void> body) {
+        if (!q->x.worker) {
+            // No worker means no loop on any vcpu, and that is an invariant now
+            // rather than an argument about windows: vq_start publishes the field
+            // BEFORE the loop exists, and creates the loop only by handing that
+            // create to the published worker, so a loop cannot outrun its own worker.
+            // retire_workers() is the only clearer, and both of its callers run it
+            // after msg_loop is joined. Three call sites are teardown (vq_stop,
+            // vq_drain, vq_backlog_drain), reached from stop_serving -- gated on
+            // `started`, which start() sets only after the whole vq_start loop -- and
+            // from rollback, start()'s own DEFER. The fourth is msg_loop answering the
+            // kernel's vq state read, and start() spawns msg_loop BEFORE it reaches
+            // the vq_start loop, so that reader is ordered behind no start() at all
+            // and is the one this invariant has to carry: it reads the plain uint16_t
+            // last_avail that dispatch_avail advances on the loop's vcpu. With no loop
+            // there is no such writer, and what the read reports is whatever start()'s
+            // own vq_refresh left -- written on this vcpu, between creating msg_loop
+            // and reaching the vq_start loop. The body is a single load with no yield
+            // in it, so nothing on this vcpu interleaves with it either. A queue whose
+            // LOOP create failed has a worker and no loop; that takes the other branch
+            // and is no worse, since the read then runs on home where the loop would
+            // have been.
+            body.fire();
+            return;
+        }
+        // `body` is ONE slot, so a handoff has to exclude another one on the same
+        // queue, and vduse has two coroutines that can be in here at once: msg_loop is
+        // alive across stop_serving's whole per-queue loop -- `stopping` is set only
+        // after it, deliberately, and the comment there says why -- so a GET_VQ_STATE
+        // can arrive while stop_serving is handing this same queue its backlog wait or
+        // its stop. Both are on this vcpu, so the lock never crosses an OS thread and
+        // is never contended in the spinlock sense; what it does is make the slot
+        // exclusive for the whole handoff rather than just for the store, which is why
+        // it is held across done.wait. Without it the second caller overwrites the
+        // first's delegate before the worker reads it, the first body never runs, and
+        // a dropped vq_stop_here leaves the loop alive while teardown goes on to unmap
+        // the ring and close the fds underneath it. vhost-user has no such lock
+        // because nothing there can be concurrent: every caller of its run_on_home is
+        // msg_loop itself, or joins msg_loop before it touches a queue.
+        SCOPED_LOCK(q->x.handoff);
+        q->x.body = body;
+        q->x.go.signal(1);
+        q->x.done.wait(1);
+    }
 
-    static void* home_thunk(void* a) {
-        auto* ha = (HomeArg*)a;
-        ha->body.fire();
-        ha->done.signal(1);
+    // The worker's own loop: one body per wake, and an EMPTY body is the exit request
+    // retire_worker sends. Deliberately the uninterruptible wait -- nothing interrupts
+    // this coroutine, so the interruptible form would only add a wakeup path no
+    // caller can use, and one that could abandon a body half run.
+    //
+    // A small stack, and not DEFAULT_STACK_SIZE: the deepest body it ever runs is
+    // vq_start's, which calls thread_create once, and the rest are a poll loop, a
+    // few field writes and a single load. 8 MB per queue would double what the loop
+    // coroutines already reserve at MAX_QUEUES for a coroutine that only polls.
+    // nbd's reaper is the same shape and uses the same size.
+    static constexpr uint32_t WORKER_STACK_SIZE = 64u << 10;
+
+    static void* worker_thunk(void* a) {
+        auto* q = (Vq*)a;
+        for (;;) {
+            q->x.go.wait(1);
+            if (!q->x.body)
+                break;
+            q->x.body.fire();
+            q->x.done.signal(1);
+        }
         return nullptr;
     }
 
-    void run_on_home(photon::vcpu_base* home, TempDelegate<void> body) {
-        if (!home || home == photon::get_vcpu()) {
-            // !home means this queue has no loop coroutine on another vcpu, and
-            // nothing else: vq_start records `home` in the same stretch that creates
-            // the loop, and that stretch yields only where a refused migration logs --
-            // which leaves the loop on this vcpu. vq_stop clears `home` only after
-            // joining that loop. So there is no window in which a loop runs elsewhere
-            // and this reads null, which is the window where working in place would
-            // race it. That has to hold for all four call sites, and they are not
-            // alike. Three are teardown (vq_stop, vq_drain, vq_backlog_drain),
-            // reached from stop_serving -- gated on `started`, which start() sets
-            // only after the whole vq_start loop -- and from rollback, start()'s own
-            // DEFER: for those a null already meant "this queue never started". The
-            // fourth is msg_loop answering the kernel's vq state read, and start()
-            // spawns msg_loop before it reaches the vq_start loop, so that reader is
-            // ordered behind no start() at all. What it needs is weaker than what the
-            // three above get -- a null must mean no writer of last_avail on ANOTHER
-            // vcpu -- but the need is unconditional, because no `started` gate and no
-            // rollback DEFER stand in front of this reader. Not that it has no
-            // writer at all -- start()'s vq_refresh writes it for every
-            // not-yet-ready queue between creating msg_loop and reaching the
-            // vq_start loop, and a refused migration leaves a loop created but not
-            // recorded yet. Both writers are on this vcpu, and the body msg_loop
-            // passes is a single load with no yield in it, so nothing can interleave
-            // with the read: the worst case is answering the kernel with a
-            // pre-refresh value.
-            body.fire();
+    // Wake it once with nothing to run, and join it. Cannot fail.
+    //
+    // Only callable once msg_loop is joined, and that is a real constraint rather
+    // than tidiness: this clears `body` and joins, so a reader that stored a body and
+    // signalled `go` first would have its body discarded and then block on `done`
+    // forever, and a reader that stores one after the clear would signal a worker
+    // this has already joined. msg_loop is the only coroutine that can hand work here
+    // behind the control plane's back, and both callers below join it first. Leaving
+    // the worker alive in the meantime is free: with `th` null every body degenerates
+    // -- vq_stop_here and the backlog wait return at once, drain() polls an in_flight
+    // nothing raises, and a state read reports a cursor no loop is advancing.
+    void retire_worker(Vq* q) {
+        if (!q->x.worker)
             return;
-        }
-        HomeArg ha{body, home};
-        auto th = photon::thread_create(&VduseDeviceImpl::home_thunk, &ha);
-        if (!th) {
-            // Cannot honour the vcpu rule, but leaving the queue up is worse: the
-            // caller is tearing it down and the address space is about to go.
-            LOG_ERROR("vduse: cannot create the coroutine for the serving vcpu, running it here");
-            body.fire();
-            return;
-        }
-        photon::thread_enable_join(th);
-        if (photon::thread_migrate(th, home) < 0)
-            LOG_WARN("vduse: cannot move the work back to the serving vcpu, ", ERRNO());
-        ha.done.wait(1);
-        photon::thread_join((photon::join_handle*)th);
+        // The same lock, because this writes the same slot. Uncontended by the time
+        // anyone calls it -- both callers join msg_loop first -- but taking it keeps
+        // the slot's exclusivity a local property of the two functions that touch it
+        // rather than something a reader has to establish from the call graph.
+        SCOPED_LOCK(q->x.handoff);
+        q->x.body.clear();
+        q->x.go.signal(1);
+        photon::thread_join((photon::join_handle*)q->x.worker);
+        q->x.worker = nullptr;
+    }
+
+    void retire_workers() {
+        for (auto* q : vqs)
+            retire_worker(q);
     }
 
     // `_here` means "already on this queue's home vcpu". Callers use the
@@ -1965,19 +1999,19 @@ struct VduseDeviceImpl : IBlkDevice {
         q->x.end_reading();
     }
 
-    // Cleared in the wrapper, not in vq_stop_here: that one runs after the hop, on
-    // the serving vcpu, and `home` is only ever written on this one. Clearing it
-    // here also keeps it alive for vq_backlog_drain, which stop_serving runs before
-    // the stop.
+    // Stops the loop and leaves the worker parked. Retiring it here would look
+    // natural and is not safe: stop_serving and rollback both run the per-queue stop
+    // BEFORE joining msg_loop, which is deliberate -- see the `stopping` comment in
+    // stop_serving -- so a GET_VQ_STATE could be handing this worker a body while
+    // this joined it. retire_workers() does it, after that join.
     void vq_stop(uint32_t idx) {
-        run_on_home(vqs[idx]->x.home, [&] { vq_stop_here(idx); });
-        vqs[idx]->x.home = nullptr;
+        run_on_home(vqs[idx], [&] { vq_stop_here(idx); });
     }
 
     // The requests hold iovs into the iotlb mappings and complete into the used
     // ring, both of which the caller is about to unmap or re-read.
     void vq_drain(uint32_t idx) {
-        run_on_home(vqs[idx]->x.home, [&] { vqs[idx]->srv.drain(); });
+        run_on_home(vqs[idx], [&] { vqs[idx]->srv.drain(); });
     }
 
     // Wait out what this queue still owes before it is stopped: the requests
@@ -2002,7 +2036,7 @@ struct VduseDeviceImpl : IBlkDevice {
     // happens-before chain of every flush that could unmap what the read goes
     // through.
     void vq_backlog_drain(uint32_t idx, bool drain_backlog) {
-        run_on_home(vqs[idx]->x.home, [&] {
+        run_on_home(vqs[idx], [&] {
             auto* q = vqs[idx];
             if (!q->th)
                 return;
@@ -2029,8 +2063,17 @@ struct VduseDeviceImpl : IBlkDevice {
     // and the top of its NEXT tick is what clears it, so it can already be set by a
     // dispatch that is parked in backend IO. Clearing it on the way out here would
     // drop that dispatch's protection while it still holds ring pointers. Nothing
-    // between the two accesses yields, so `held` cannot go stale -- and this runs on
-    // `home`, the only vcpu the loop's own setter runs on.
+    // between the two accesses yields, so `held` cannot go stale -- but that is only
+    // half of what makes the snapshot sound. The other half is that this runs on the
+    // vcpu the loop's own setter runs on and on no other, because its only caller
+    // reaches it through run_on_home, which hands the body to the worker vq_start
+    // created on that vcpu. A body that could instead run on the control vcpu would
+    // read `held` false, have the loop set the bit in between, take that as its own
+    // re-entry, and then clear a protection the loop is still standing on -- and
+    // reclaim_eligible, which tests exactly that bit under iotlb.lock, would munmap
+    // the ring underneath it. begin_reading's "already set means re-entry" answer
+    // presumes one setter vcpu; the pre-created worker is what makes the presumption
+    // hold rather than merely likely.
     bool backlog_pending(Vq* q) {
         const bool held = q->x.reading();
         if (!q->x.begin_reading())
@@ -2039,34 +2082,95 @@ struct VduseDeviceImpl : IBlkDevice {
         return q->srv.last_avail != vring_avail_idx(q->srv.avail);
     }
 
-    // Start one queue's loop coroutine, once its ring is resolved. Only start()
+    // Start one queue's two coroutines, once its ring is resolved. Only start()
     // calls this: nothing in the message loop stops a queue, so nothing there has
     // to put one back either.
+    //
+    // Two steps, and the split between them is what makes run_on_home's null branch
+    // airtight rather than merely usually right.
+    //
+    // The first migrates an OWNER whose only job is to create the worker, so that the
+    // worker lands on a pool vcpu without this vcpu having to name one.
+    // migrate_to_pool draws the pool's cursor once per call, so migrating a second
+    // coroutine separately could land it on a different vcpu, and aiming a second hop
+    // at the first one's landing vcpu is a second thing that can be refused. The
+    // owner reports the handle back through StartArg instead of writing it into the
+    // Vq, because it runs on the landing vcpu while `worker` is a control-plane
+    // field: the caller publishes it, which leaves every write to that field on the
+    // vcpu that later clears it.
+    //
+    // The second creates the loop THROUGH the published worker, and that order is the
+    // point. A loop can then exist only on a queue whose worker this vcpu has already
+    // published, so a reader here that finds the field null knows there is no loop on
+    // any vcpu and may run its body in place. Creating the loop inside the owner
+    // instead would leave a window where the loop is live on the landing vcpu and the
+    // field still reads null -- and msg_loop is alive across this whole function,
+    // because start() creates it before the vq_start loop, so a GET_VQ_STATE could
+    // land in that window and read last_avail here while the loop advanced it there.
+    //
+    // A worker whose loop could not be created is left published rather than retired.
+    // Retiring joins, and msg_loop could be mid-handoff; nothing needs it reaped here
+    // either, since with `th` null every body degenerates, and retire_workers() takes
+    // it once msg_loop is joined.
+    struct StartArg {
+        Vq* q = nullptr;
+        photon::thread* worker = nullptr;
+        photon::semaphore done{0};   // NSDMI, not {}: semaphore's ctor is explicit
+        int err = 0;
+    };
+
+    static void* start_owner(void* a) {
+        auto* sa = (StartArg*)a;
+        sa->worker = photon::thread_create(&VduseDeviceImpl::worker_thunk, sa->q,
+                                          WORKER_STACK_SIZE);
+        if (!sa->worker)
+            sa->err = errno ? errno : EIO;
+        else
+            photon::thread_enable_join(sa->worker);
+        sa->done.signal(1);
+        return nullptr;   // the owner leaves; the worker it created stays
+    }
+
     int vq_start(uint32_t idx) {
         auto* q = vqs[idx];
         if (q->th)
             return 0;
         q->srv.stopping.store(false, std::memory_order_relaxed);
         q->srv.run.store(true, std::memory_order_relaxed);
-        q->th = photon::thread_create(&loop_thunk, q);
-        if (!q->th)
-            LOG_ERRNO_RETURN(0, -1, "vduse: cannot create the vq` loop coroutine, dev `", idx, name);
-        // enable_join BEFORE the migration -- it writes a flag in the thread's own
-        // struct, which another OS thread owns once migrated. ublk's start_serving
-        // uses this same order. What the order really buys is that nothing between
-        // the create and the migration yields: a yield lets the loop run here first
-        // and park in its kickfd wait -- WAITING, not READY -- and the migration
-        // then refuses it. The default log path does not yield (alog takes a
-        // spinlock); a caller-installed sink writing through a photon IFile would,
-        // which is why there is no logging in between.
-        photon::thread_enable_join(q->th);
-        migrate_to_pool(cfg.pool, q->th);
-        // After the migration, and that is not an exception to the rule above: this
-        // is an inline field read, so it cannot yield, and the field it reads is
-        // written only by do_thread_migrate under the thread's own lock. The thread
-        // cannot have gone away either -- enable_join above keeps its struct alive
-        // even if the loop exits at once, until vq_stop_here joins it.
-        q->x.home = photon::get_vcpu(q->th);   // already final -- see its declaration
+        StartArg sa{q};
+        auto own = photon::thread_create(&VduseDeviceImpl::start_owner, &sa);
+        if (!own)
+            LOG_ERRNO_RETURN(0, -1, "vduse: cannot create the vq` owner coroutine, dev `", idx, name);
+        // enable_join BEFORE the migration: it writes a flag in the owner's own
+        // thread struct, which another OS thread owns once migrated. What the order
+        // also buys is that nothing between the create and the migration yields -- a
+        // yield lets the owner run here first and park having already signalled,
+        // WAITING rather than READY, and the migration then refuses it. The default
+        // log path does not yield (alog takes a spinlock); a caller-installed sink
+        // writing through a photon IFile would, which is why there is no logging in
+        // between.
+        photon::thread_enable_join(own);
+        migrate_to_pool(cfg.pool, own);
+        sa.done.wait(1);
+        photon::thread_join((photon::join_handle*)own);
+        if (sa.err)
+            LOG_ERROR_RETURN(sa.err, -1, "vduse: cannot create the vq` worker coroutine, dev `", idx, name);
+        q->x.worker = sa.worker;
+        // Handed to the worker rather than created here so that the loop, and every
+        // request coroutine it spawns, runs on the worker's vcpu -- the one the
+        // teardown bodies have to reach.
+        photon::thread* loop = nullptr;
+        int err = 0;
+        run_on_home(q, [&] {
+            loop = photon::thread_create(&loop_thunk, q);
+            if (!loop)
+                err = errno ? errno : EIO;
+            else
+                photon::thread_enable_join(loop);
+        });
+        q->th = loop;
+        if (err)
+            LOG_ERROR_RETURN(err, -1, "vduse: cannot create the vq` loop coroutine, dev `", idx, name);
         return 0;
     }
 
@@ -2311,6 +2415,11 @@ struct VduseDeviceImpl : IBlkDevice {
             photon::thread_join((photon::join_handle*)msg_th);
             msg_th = nullptr;
         }
+        // After that join and not before it: msg_loop is the one coroutine that can
+        // hand a worker a body behind the control plane's back, and retire_worker
+        // joins. With it gone the vq_drain below finds no worker and runs in place,
+        // which it may -- drain() polls nothing but the atomic in_flight.
+        retire_workers();
         for (uint32_t i = 0; i < nqueues; i++) {
             // the pre-join drain cannot see a batch the vq loop dispatched in the
             // window before `stopping` took effect: those request coroutines hold
@@ -2652,11 +2761,12 @@ struct VduseDeviceImpl : IBlkDevice {
         // and vq_start runs after this whole loop. It stores srv.stopping and
         // srv.run: both exist from construction, and nothing reads them before a
         // loop exists. It reaches the queue through run_on_home, in vq_stop and
-        // again in vq_drain: x.home is recorded by vq_start, so it is
-        // still null here, and the null branch runs the body in place instead of
-        // hopping. And it calls srv.drain(): that spins on in_flight, which is
-        // initialized to 0 and which a queue that never had a loop to dispatch
-        // on never raised.
+        // again in vq_drain, and it retires the worker: x.worker is published by
+        // vq_start, so it is still null for a queue that never got that far -- the
+        // null branch runs the body in place instead of handing it over, and
+        // retire_worker returns at once on that same null. And it calls srv.drain():
+        // that spins on in_flight, which is initialized to 0 and which a queue that
+        // never had a loop to dispatch on never raised.
         for (uint32_t i = 0; i < nqueues; i++)
             if (setup_vq(i) < 0)
                 return -1;
@@ -2939,6 +3049,7 @@ struct VduseDeviceImpl : IBlkDevice {
             photon::thread_join((photon::join_handle*)msg_th);
             msg_th = nullptr;
         }
+        retire_workers();   // see stop_serving for why only after that join
         for (uint32_t i = 0; i < nqueues; i++)
             // request coroutines may still hold VAs into the mappings
             vq_drain(i);

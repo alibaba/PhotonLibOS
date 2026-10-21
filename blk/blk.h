@@ -222,10 +222,10 @@ struct BlkDevInfo {
 // detects a breach, and the failure is not a clean one: every transport keeps its
 // control plane in fields that are plain precisely because only that one vcpu writes
 // them -- whether it is serving, its registration id, its lock fd, its queue list.
-// vhost-user and vduse also record the vcpu their serving coroutines landed on, so
-// that teardown can hop onto it, and that record is written by a start and cleared by
-// a teardown: issuing the two from different vcpus reads and clears it from a second
-// OS thread with nothing ordering them. resize() belongs to the set for the same
+// All four also keep a handle on the coroutine that runs their queue-side work on
+// the serving vcpu, and that handle is written by a start and cleared by a teardown:
+// issuing the two from different vcpus reads and clears it from a second OS thread
+// with nothing ordering them. resize() belongs to the set for the same
 // reason: vhost-user's writes the config bytes its own message loop answers a
 // GET_CONFIG from, and ublk's submits on an io_uring whose submission side is not
 // thread-safe.
@@ -240,13 +240,14 @@ struct BlkDevInfo {
 // Getting the teardown ONTO the serving vcpu is the transport's problem, not the
 // caller's, and what this contract promises is the part a caller can act on: no
 // transport refuses a teardown because of placement, and none leaves serving
-// coroutines behind on one. ublk and tcmu create the coroutine that will run theirs
-// at START time, on the vcpu the serving coroutines land on, so a teardown only wakes
+// coroutines behind on one. All four create the coroutine that will run theirs at
+// START time, on the vcpu the serving coroutines land on, so a teardown only wakes
 // it and joins it -- with no allocation and no migration left to do there is nothing
 // that can be refused, and the join is what makes it safe to free the queue, unmap
-// the ring and delete the backend afterwards. vhost-user and vduse still allocate a
-// coroutine per hop; when they cannot honour the placement they run the work where
-// the caller is and log it, rather than leaving a queue up or handing back a failure.
+// the ring and delete the backend afterwards. ublk and tcmu pre-create one teardown
+// coroutine each; vhost-user and vduse pre-create a per-queue worker that runs the
+// teardown bodies and, while the queue is live, the reads that have to be on the
+// serving vcpu too.
 // detach() and shutdown() do answer -1, for the reasons their own documents name --
 // a device an initiator still holds, a registration the kernel will not remove --
 // and never for this one.
