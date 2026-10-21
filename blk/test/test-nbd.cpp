@@ -66,6 +66,90 @@ struct NbdTestClient {
     uint32_t min_block = 0, pref_block = 0, max_block = 0;
     uint16_t first_info_type = 0xffff;
 
+    // ---- what a failed exchange leaves behind ----
+    // handshake() collapses every one of its five exchanges into the same -1, so
+    // "failed at handshake" cannot say whether the greeting never arrived, the
+    // option never got out, or an answer came back and was refused. hs_stage names
+    // the step that was running, hs_want the bytes that step needed, and hs_in /
+    // hs_out what each direction actually moved -- a partial count is a peer that
+    // stopped mid-message, a zero is a peer that never spoke. hs_word keeps the
+    // reply type of the last header read, which is the only way to tell a
+    // transport failure from a well-formed NBD error reply, since both return -1
+    // and the error reply leaves errno holding the previous fd wait's EOK.
+    enum : int {
+        HS_IDLE = 0, HS_GREETING, HS_GREET_MAGIC, HS_CFLAGS, HS_OPT_HEADER,
+        HS_OPT_PAYLOAD, HS_REP_HEADER, HS_REP_MAGIC, HS_REP_PAYLOAD, HS_REP_REFUSED,
+        HS_DONE,
+    };
+    int hs_stage = HS_IDLE;
+    uint32_t hs_word = 0;
+    size_t hs_want = 0, hs_in = 0, hs_out = 0;
+
+    // Every byte this client received, so a failure can show the stream itself
+    // instead of a summary of it -- the counters say how far it got, but only the
+    // bytes say what arrived. Capped, because a pipelined READ would otherwise
+    // copy the whole data set to answer a question about the handshake.
+    static const size_t RX_CAP = 4096;
+    std::vector<char> rx;
+
+    // The first `n` received bytes as hex, into a caller's buffer: one log line has
+    // to carry it, and building a string for that would allocate on the failure path.
+    static void hexdump(const std::vector<char>& v, size_t n, char* out, size_t outsz) {
+        size_t o = 0;
+        for (size_t i = 0; i < v.size() && i < n && o + 4 < outsz; i++)
+            o += (size_t)snprintf(out + o, outsz - o, "%02x ", (unsigned char)v[i]);
+        if (o < outsz)
+            out[o] = 0;
+    }
+
+    static const char* hs_stage_name(int st) {
+        switch (st) {
+        case HS_IDLE:         return "idle";
+        case HS_GREETING:     return "greeting-read";
+        case HS_GREET_MAGIC:  return "greeting-magic";
+        case HS_CFLAGS:       return "cflags-write";
+        case HS_OPT_HEADER:   return "option-header-write";
+        case HS_OPT_PAYLOAD:  return "option-payload-write";
+        case HS_REP_HEADER:   return "reply-header-read";
+        case HS_REP_MAGIC:    return "reply-magic";
+        case HS_REP_PAYLOAD:  return "reply-payload-read";
+        case HS_REP_REFUSED:  return "reply-refused";
+        case HS_DONE:         return "done";
+        }
+        return "?";
+    }
+
+    // Is the peer's answer already in this socket's receive buffer? Neither
+    // consumes nor blocks, so asking it at the moment a read gave up separates a
+    // vcpu that never woke for an event that had arrived from a peer that never
+    // produced the bytes. `word` is the first four bytes as the wire holds them,
+    // big-endian, which identifies an answer that is there but was not read.
+    struct Peek {
+        ssize_t n = -1;
+        int err = 0;
+        uint32_t word = 0;
+    };
+    Peek peek_rx(size_t nbytes = 64) {
+        Peek p;
+        int fd = s ? s->get_underlay_fd() : -1;
+        if (fd < 0) {
+            p.err = EBADF;
+            return p;
+        }
+        unsigned char b[256];
+        if (nbytes > sizeof(b))
+            nbytes = sizeof(b);
+        ssize_t r = ::recv(fd, b, nbytes, MSG_PEEK | MSG_DONTWAIT);
+        if (r < 0) {
+            p.err = errno;
+            return p;
+        }
+        p.n = r;
+        if (r >= 4)
+            p.word = be32rd(b);
+        return p;
+    }
+
     ~NbdTestClient() {
         if (s) {
             disc();
@@ -114,12 +198,19 @@ struct NbdTestClient {
     // handshake() sends -- the cases that need a payload of their own start here
     int handshake_front() {
         char hdr[18];
+        hs_stage = HS_GREETING;
+        hs_want = sizeof(hdr);
         if (read_exact(hdr, sizeof(hdr)) < 0)
             return -1;
-        if (be64rd(hdr) != NBD_INIT_MAGIC || be64rd(hdr + 8) != NBD_OPTS_MAGIC)
+        hs_stage = HS_GREET_MAGIC;
+        if (be64rd(hdr) != NBD_INIT_MAGIC || be64rd(hdr + 8) != NBD_OPTS_MAGIC) {
+            hs_word = (uint32_t)(be64rd(hdr) >> 32);
             return -1;
+        }
         char cf[4];
         be32wr(cf, NBD_FLAG_C_FIXED_NEWSTYLE | NBD_FLAG_C_NO_ZEROES);
+        hs_stage = HS_CFLAGS;
+        hs_want = sizeof(cf);
         return write_exact(cf, sizeof(cf));
     }
 
@@ -224,17 +315,27 @@ struct NbdTestClient {
 
         while (true) {
             char rh[20];
+            hs_stage = HS_REP_HEADER;
+            hs_want = sizeof(rh);
             if (read_exact(rh, sizeof(rh)) < 0)
                 return -1;
-            if (be64rd(rh) != NBD_REP_MAGIC)
+            hs_stage = HS_REP_MAGIC;
+            if (be64rd(rh) != NBD_REP_MAGIC) {
+                hs_word = (uint32_t)(be64rd(rh) >> 32);
                 return -1;
+            }
             uint32_t type = be32rd(rh + 12);
             uint32_t len = be32rd(rh + 16);
+            hs_word = type;
             std::vector<char> d(len);
+            hs_stage = HS_REP_PAYLOAD;
+            hs_want = len;
             if (len && read_exact(d.data(), len) < 0)
                 return -1;
-            if (type & (1u << 31))
+            if (type & (1u << 31)) {
+                hs_stage = HS_REP_REFUSED;
                 return -1;
+            }
             if (type == NBD_REP_INFO && len >= 2) {
                 uint16_t info = be16rd(d.data());
                 if (first_info_type == 0xffff)
@@ -250,8 +351,10 @@ struct NbdTestClient {
                     trans_flags = be16rd(d.data() + 10);
                 }
             }
-            if (type == NBD_REP_ACK)
+            if (type == NBD_REP_ACK) {
+                hs_stage = HS_DONE;
                 return 0;
+            }
         }
     }
 
@@ -349,15 +452,33 @@ private:
             errno = ECONNRESET;
         return -1;
     }
-    int read_exact(void* buf, size_t n) { return exact(s->read(buf, n), n); }
-    int write_exact(const void* buf, size_t n) { return exact(s->write(buf, n), n); }
+    int read_exact(void* buf, size_t n) {
+        ssize_t r = s->read(buf, n);
+        if (r > 0) {
+            hs_in += (size_t)r;
+            size_t room = rx.size() < RX_CAP ? RX_CAP - rx.size() : 0;
+            size_t k = (size_t)r < room ? (size_t)r : room;
+            rx.insert(rx.end(), (const char*)buf, (const char*)buf + k);
+        }
+        return exact(r, n);
+    }
+    int write_exact(const void* buf, size_t n) {
+        ssize_t r = s->write(buf, n);
+        if (r > 0)
+            hs_out += (size_t)r;
+        return exact(r, n);
+    }
     int send_option(uint32_t opt, const void* data, uint32_t len) {
         char h[16];
         be64wr(h, NBD_OPTS_MAGIC);
         be32wr(h + 8, opt);
         be32wr(h + 12, len);
+        hs_stage = HS_OPT_HEADER;
+        hs_want = sizeof(h);
         if (write_exact(h, sizeof(h)) < 0)
             return -1;
+        hs_stage = HS_OPT_PAYLOAD;
+        hs_want = len;
         if (len && write_exact(data, len) < 0)
             return -1;
         return 0;
@@ -1397,11 +1518,17 @@ TEST_F(NbdTest, two_devices_share_one_pool) {
 // dereferencing it would be this test's own use-after-free.
 TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
     test::TestPool pool(4);
+    // The same churn with serve_conn kept on this vcpu instead of migrated: the
+    // only difference between the two runs is whether a connection coroutine ever
+    // crosses an OS thread, so a failure that appears in one and not the other is
+    // placed by that crossing rather than by the handshake itself.
+    bool no_pool = getenv("NBD_TEST_NO_POOL") != nullptr;
+    LOG_INFO(VALUE(no_pool));
     NbdConfig cfg(make_info());
     cfg.loopback_device = false;
     cfg.enable_tcp = true;
     cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
-    cfg.pool = pool;
+    cfg.pool = no_pool ? nullptr : (photon::WorkPool*)pool;
     auto dev = new_nbd_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -1467,17 +1594,36 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
                 // connection or dropped it mid-request
                 const char* phase = "connect";
                 int err = 0;
+                // captured INSIDE the block below: the destructor sends DISC and
+                // closes the socket, which erases both the errno and whatever was
+                // still buffered to peek at
+                const char* hs_stage = "";
+                uint32_t hs_word = 0;
+                size_t hs_want = 0, hs_in = 0, hs_out = 0;
+                NbdTestClient::Peek pk;
+                char rxdump[3 * 128 + 1] = "";
+                uint16_t self_port = 0;   // the server logs its peer, this is the other half
                 {
                     NbdTestClient cli;
                     if (cli.connect_tcp("127.0.0.1", p0) != 0) {
                         err = errno;
                     } else {
+                        net::EndPoint self;
+                        if (cli.s->getsockname(self) == 0)
+                            self_port = self.port;
                         // after the connect: set_timeout() forwards to the stream,
                         // which only exists once connect_tcp has stored it
                         cli.set_timeout(CLIENT_TIMEOUT_US);
                         phase = "handshake";
                         if (cli.handshake() != 0) {
                             err = errno;
+                            hs_stage = NbdTestClient::hs_stage_name(cli.hs_stage);
+                            hs_word = cli.hs_word;
+                            hs_want = cli.hs_want;
+                            hs_in = cli.hs_in;
+                            hs_out = cli.hs_out;
+                            pk = cli.peek_rx();
+                            NbdTestClient::hexdump(cli.rx, 128, rxdump, sizeof(rxdump));
                         } else {
                             phase = "write";
                             st = cli.xfer(NBD_CMD_WRITE, off, wbuf.data(), wbuf.size());
@@ -1501,6 +1647,10 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
                     !down.load(std::memory_order_acquire)) {
                     LOG_ERROR("client ` iter ` failed at ` with ` errno ` on port ` (current `) outside the restart window",
                               t, i, phase, st, err, p0, port.load(std::memory_order_acquire));
+                    LOG_ERROR("client ` iter ` handshake died in `, ",
+                              t, i, hs_stage, VALUE(self_port), VALUE(hs_word), VALUE(hs_want),
+                              VALUE(hs_in), VALUE(hs_out), VALUE(pk.n), VALUE(pk.err), VALUE(pk.word));
+                    LOG_ERROR("client ` iter ` received: ", t, i, rxdump);
                     bad++;
                 }
                 if (!st)
