@@ -1774,6 +1774,37 @@ TEST_F(VhostUserTest, repassing_an_owned_backend_after_detach_never_deletes_it_t
     EXPECT_EQ(1, destroyed.load()) << "the owned backend must die exactly once";
 }
 
+// detach() keeps the socket node on purpose, so that a later start() -- possibly another
+// process's -- takes the registration over; shutdown() is the call that ends it. The
+// unlink used to be gated on `started`, which detach() had just cleared, so the node
+// outlived the session. Since start() refuses an occupied path with EEXIST rather than
+// probing or removing it, this device then could not start again on a node it owns, and
+// only destroy_orphan() -- recovery for a node nobody owns -- could clear it. The
+// start -> shutdown half is pinned by config_validation; this is the detached half.
+TEST_F(VhostUserTest, shutdown_after_detach_removes_the_node_so_the_device_can_start_again) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    ASSERT_EQ(0, dev->start(file));
+    ASSERT_EQ(0, dev->detach(true));
+    EXPECT_EQ(0, ::access(SOCK_PATH, F_OK)) << "detach() is a handover, not an end: the node must survive it";
+
+    ASSERT_EQ(0, dev->shutdown());
+    errno = 0;
+    EXPECT_NE(0, ::access(SOCK_PATH, F_OK)) << "shutdown() left the socket node behind";
+    EXPECT_EQ(ENOENT, errno);
+
+    // the point of removing it: the same device starts again on the same path, with no
+    // orphan recovery in between
+    ASSERT_EQ(0, dev->start(file));
+    EXPECT_EQ(0, ::access(SOCK_PATH, F_OK));
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_NE(0, ::access(SOCK_PATH, F_OK));
+}
+
 TEST_F(VhostUserTest, server_basic_io) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;

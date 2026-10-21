@@ -355,6 +355,13 @@ struct VhostUserDeviceImpl : IBlkDevice {
 
     bool own_backend = false;
     bool started = false;
+    // Set once do_listen() has bound AND listened on sock_path, cleared when the node is
+    // unlinked. Deliberately not `started`: detach() stops serving but keeps the
+    // registration, node included, so a later start() can take over -- and since start()
+    // refuses an occupied path with EEXIST without probing or removing it, keying the
+    // unlink on `started` left start -> detach -> shutdown unable to start again on a
+    // node this device owns. Implies the SERVER role, do_listen() being the only setter.
+    bool sock_owned = false;
     uint8_t  sector_shift = 9;
     bool     read_only = false;
     // Written and read only by the control plane (msg_loop, accept_loop, start,
@@ -454,6 +461,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
             shutdown();
         // the backstop for a session ended by detach() rather than shutdown()
         release_backend();
+        release_sock_node();
         // Only here, never in rollback(): a rolled-back device must stay able to
         // start again, and these are the slots it starts.
         for (auto* q : vqs)
@@ -1677,6 +1685,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
             LOG_WARN("vhost-user chmod failed on `, ", sock_path, ERRNO());
         owned = true;
         listen_fd = fd;
+        sock_owned = true;
         return 0;
     }
 
@@ -1905,15 +1914,24 @@ struct VhostUserDeviceImpl : IBlkDevice {
         return 0;
     }
 
+    // Give up the socket node this device bound. Idempotent, and a no-op for the CLIENT
+    // role, which never sets sock_owned.
+    void release_sock_node() {
+        if (!sock_owned)
+            return;
+        sock_owned = false;
+        if (::unlink(sock_path) != 0 && errno != ENOENT)
+            LOG_WARN("vhost-user could not remove its own socket `, ", sock_path, ERRNO());
+    }
+
     int shutdown() override {
         if (started) {
             detach(true);
-            if (cfg.sock_role == VhostUserController::SockRole::SERVER)
-                ::unlink(sock_path);   // remove the tombstone; a CLIENT frontend
-                                       // owns its socket and is left alone
             LOG_INFO("vhost-user device shut down, ",
                      make_named_value("sock_path", (const char*)sock_path));
         }
+        // outside the `started` test, same reason as release_backend() below
+        release_sock_node();
         // blk.h's start() contract: an owned backend is deleted on shutdown, not
         // only by the destructor. The object outlives a shutdown() and the next
         // start() overwrites the pointer, so releasing it only at destruction leaks
@@ -1989,13 +2007,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
         if (listen_fd >= 0) {
             ::close(listen_fd);
             listen_fd = -1;
-            // only OUR listener's socket file: when do_listen refused the path or
-            // failed to bind it, listen_fd is still -1 and the node there belongs
-            // to someone else -- do not unlink it (same invariant as ublk's
-            // rollback-vs-DEL_DEV)
-            if (cfg.sock_role == VhostUserController::SockRole::SERVER)
-                ::unlink(sock_path);
         }
+        // only OUR listener's socket file: when do_listen refused the path or failed to
+        // bind it, sock_owned is still false and the node there belongs to someone else
+        // -- do not unlink it (same invariant as ublk's rollback-vs-DEL_DEV)
+        release_sock_node();
         // virgin state includes backend ownership (the cross-transport rule).
         // sock_path is NOT part of it: it is the identity, fixed at construction.
         backend = nullptr;

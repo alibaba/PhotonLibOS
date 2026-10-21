@@ -172,6 +172,16 @@ namespace blk {
 #define UBLK_S_DEV_QUIESCED     2
 #define UBLK_S_DEV_FAIL_IO      3
 
+// Kernel-internal errno from <linux/errno.h>, which is not exported: glibc's
+// <errno.h> does not define it and neither does the uapi <asm-generic/errno.h>.
+// ublk_ctrl_uring_cmd's default case answered an unknown control command with
+// -ENOTSUPP up to Linux 6.12 and had switched to -EOPNOTSUPP by 6.15 (read out
+// of v6.6, v6.12, v6.15 and v6.18), so a shutdown() that recognises only the
+// latter misreads the older answer -- see the TRY_STOP_DEV fallback below.
+#ifndef ENOTSUPP
+#define ENOTSUPP 524
+#endif
+
 // shipped via sqe->cmd of the control ring
 struct ublksrv_ctrl_cmd {
     uint32_t dev_id;
@@ -1585,7 +1595,8 @@ struct UblkDeviceImpl : IBlkDevice {
             for (uint32_t i = 0; ; i++) {
                 if (ctrl.try_stop_dev((uint32_t)dev_id) == 0)
                     break;
-                if (errno == EOPNOTSUPP) {   // no SAFE_STOP_DEV: plain stop
+                int e = errno;   // captured once: every branch below calls something
+                if (e == EOPNOTSUPP || e == ENOTSUPP) {   // no TRY_STOP_DEV: plain stop
                     // Do not swallow this: a device that failed to stop is still live,
                     // and DEL_DEV below does not refuse a live one -- measured, it
                     // blocks until the last opener closes and then returns success.
@@ -1596,8 +1607,19 @@ struct UblkDeviceImpl : IBlkDevice {
                         LOG_ERRNO_RETURN(0, -1, "ublk STOP_DEV failed, dev `", dev_id);
                     break;
                 }
-                if (errno != EBUSY)
-                    break;   // ENODEV (never started) etc: proceed to DEL_DEV
+                if (e == ENODEV)
+                    break;   // the registration is already gone, which is the goal
+                if (e != EBUSY) {
+                    // Not one of the three answers this loop understands, so nothing
+                    // here knows whether the device is still live. Propagate it with
+                    // the service and the registration untouched: proceeding to
+                    // stop_serving() + DEL_DEV would tear down on an unread answer,
+                    // and DEL_DEV on a live device blocks for an unbounded time and
+                    // then reports success.
+                    if (!started)
+                        release_lock();   // only claimed for this teardown; see below
+                    LOG_ERROR_RETURN(e, -1, "ublk TRY_STOP_DEV failed unexpectedly, dev `", dev_id);
+                }
                 if (i >= max_retry) {
                     // a started device keeps serving (and keeps the lock);
                     // a detached one was only claimed for this teardown --

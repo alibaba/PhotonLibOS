@@ -216,11 +216,14 @@ static inline struct iovec* tcmu_entry_iov(tcmu_cmd_entry* e) {
 // <scsi/scsi_proto.h>, which is not exported to /usr/include. So these are
 // checked empirically instead -- the unknown_opcode case in test-tcmu.cpp puts
 // SAM_CHECK_CONDITION and our own sense bytes through the real kernel and LIO
-// and asserts what comes back on the wire.
+// and asserts what comes back on the wire. SAM_TASK_SET_FULL has no such witness:
+// the only path that emits it is a failed coroutine creation, which no test can
+// currently provoke, so its value rests on SAM-5 alone.
 // ----------------------------------------------------------------------------
 
 static constexpr uint8_t SAM_GOOD            = 0x00;
 static constexpr uint8_t SAM_CHECK_CONDITION = 0x02;
+static constexpr uint8_t SAM_TASK_SET_FULL   = 0x28;
 
 static constexpr uint8_t SK_NO_SENSE        = 0x0;
 static constexpr uint8_t SK_MEDIUM_ERROR    = 0x3;
@@ -841,24 +844,36 @@ struct TcmuServer {
             uint32_t off = uio.parse_pos;
             uio.parse_pos = (uio.parse_pos + len) % uio.cmdr_size;
             if (op == TCMU_OP_CMD && !answered) {
-                // in-flight until handle_cmd completes -- set BEFORE the create
-                // and left set if the create fails, so advance_tail cannot
-                // reclaim the space of an entry nobody answered
+                // in-flight until handle_cmd completes -- set BEFORE the create, so no
+                // window can leave the bit set for an entry nobody answered
                 uio.done[off >> 3] = false;
                 // handle_cmd's DEFER is the only thing that decrements in_flight
                 // and returns the dispatch slot, so commit in_flight only once
                 // the create succeeded: a nullptr return (photon's stack
                 // allocation failed) would wedge serve_stop's `while (in_flight)`
-                // forever and lose the slot. The entry then stays pending for
-                // the kernel's cmd_time_out, which beats completing it with no
-                // response written.
+                // forever and lose the slot.
                 auto* arg = new CmdArg{this, ent};
                 if (photon::thread_create(&TcmuServer::trampoline, arg, stack_size)) {
                     in_flight++;
                 } else {
                     delete arg;
                     slots.signal(1);
-                    LOG_ERROR("tcmu: cannot create the command coroutine at ring offset `, leaving it pending", off);
+                    // Answer it here; leaving it pending is not an option. The kernel's
+                    // cmd_time_out completes the INITIATOR's command but does not reclaim
+                    // the ring slot -- tcmu_check_expired_ring_cmd() only marks the cmd
+                    // expired and detaches se_cmd, and the slot is freed when the kernel
+                    // walks a DONE entry (target_core_user.c, 7.2.3). With parse_pos
+                    // already past it and the bit never set, advance_tail() could not
+                    // cross this entry again and the command ring would eventually fill.
+                    // TASK SET FULL is the kernel's own answer for a command it could not
+                    // take (tcmu_check_expired_queue_cmd), and the initiator retries it,
+                    // which is the right outcome for a transient stack allocation failure.
+                    // set_status also marks the entry RESPONDED, so a successor daemon
+                    // retires it instead of re-dispatching it.
+                    set_status(ent, SAM_TASK_SET_FULL);
+                    uio.done[off >> 3] = true;
+                    marked = true;
+                    LOG_ERROR("tcmu: cannot create the command coroutine at ring offset `, answering TASK SET FULL", off);
                 }
             } else {
                 // PAD needs no response; TMR cannot appear (tmr_notification=0); and
@@ -2086,6 +2101,17 @@ struct TcmuDeviceImpl : IBlkDevice {
         }
         if (reg && registered)
             reg->unregister_link(&link);
+        // do_shutdown() deliberately keeps the claim when destroy_backstore() fails --
+        // an ENABLED backstore wearing a FREE tombstone is exactly what list_orphans()
+        // and the HBA's initial_scan hand to the next adopter -- and a retry from here
+        // can fail the same way. lock_fd is a plain member, so without this the fd and
+        // its flock outlive the object until process exit, and since flock is per open
+        // file description even this process's next acquire answers EWOULDBLOCK: every
+        // later recovery sees a phantom owner and reports EBUSY. Serving has stopped on
+        // every path that can still hold it (run_serve_stop joins the pump), so nothing
+        // can reach the lock after this. devlock_release() is a no-op on -1, which leaves
+        // the paths that already released it untouched. ublk's destructor does the same.
+        release_lock();
         release_backend();
     }
 
