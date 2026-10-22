@@ -67,15 +67,16 @@ struct NbdTestClient {
     uint16_t first_info_type = 0xffff;
 
     // ---- what a failed exchange leaves behind ----
-    // handshake() collapses every one of its five exchanges into the same -1, so
+    // handshake() collapses every step it can fail in into the same -1, so
     // "failed at handshake" cannot say whether the greeting never arrived, the
     // option never got out, or an answer came back and was refused. hs_stage names
     // the step that was running, hs_want the bytes that step needed, and hs_in /
     // hs_out what each direction actually moved -- a partial count is a peer that
-    // stopped mid-message, a zero is a peer that never spoke. hs_word keeps the
-    // reply type of the last header read, which is the only way to tell a
-    // transport failure from a well-formed NBD error reply, since both return -1
-    // and the error reply leaves errno holding the previous fd wait's EOK.
+    // stopped mid-message, a zero is a peer that never spoke. hs_word is the reply
+    // type when a header parsed, and the high 32 bits of what arrived when its
+    // magic did not; either way it is what tells a transport failure from a
+    // well-formed NBD error reply, since both return -1 and the error reply leaves
+    // errno holding the previous fd wait's EOK.
     enum : int {
         HS_IDLE = 0, HS_GREETING, HS_GREET_MAGIC, HS_CFLAGS, HS_OPT_HEADER,
         HS_OPT_PAYLOAD, HS_REP_HEADER, HS_REP_MAGIC, HS_REP_PAYLOAD, HS_REP_REFUSED,
@@ -1602,7 +1603,7 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
                 size_t hs_want = 0, hs_in = 0, hs_out = 0;
                 NbdTestClient::Peek pk;
                 char rxdump[3 * 128 + 1] = "";
-                uint16_t self_port = 0;   // the server logs its peer, this is the other half
+                uint16_t self_port = 0;   // this client's local port; nbd.cpp logs no peer
                 {
                     NbdTestClient cli;
                     if (cli.connect_tcp("127.0.0.1", p0) != 0) {
