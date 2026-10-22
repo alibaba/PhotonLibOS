@@ -38,6 +38,12 @@ photon_option(PHOTON_ENABLE_LIBCURL      BOOL   ON    "enable libcurl")
 photon_option(PHOTON_DEFAULT_LOG_LEVEL   STRING "0"   "default log level")
 photon_option(PHOTON_BUILD_OCF_CACHE     BOOL   OFF   "enable ocf cache")
 photon_option(PHOTON_ENABLE_KCP          BOOL   OFF   "enable kcp")
+# ON by default because blk was never optional until this knob existed: blk/nbd.cpp
+# and blk/utils.cpp carry no external dependency and had no ENABLE condition, and the
+# other four transports follow LINUX (ublk also PHOTON_ENABLE_URING), so no
+# configuration ever excluded blk. Defaulting this OFF would drop all of it -- and
+# every blk suite -- out of a default build and out of CI, which passes no -D for it.
+photon_option(PHOTON_ENABLE_BLK          BOOL   ON    "enable blk/: nbd, tcmu, ublk, vduse, vhost-user block-device exports")
 
 # Download locations for build-from-source (used when PHOTON_BUILD_DEPENDENCIES is ON).
 photon_option(PHOTON_BUILD_DEPENDENCIES  BOOL   OFF   "")
@@ -219,23 +225,38 @@ photon_module(ecosystem
         REQUIRES http
         SOURCES  ecosystem/*.cpp
         OBJ_LINK ecosystem_deps)
+# The whole blk/ subtree sits behind ONE user-facing switch, PHOTON_ENABLE_BLK.
+# photon_module() ANDs OPTION with ENABLE, so each transport below is built when
+# that switch is on AND its own target is suitable -- and there is deliberately no
+# per-transport knob, because "which transports can this build carry" is a fact
+# about the target, not a second preference the caller should have to state. The
+# two CLI tools further down and the suites in blk/test/ read the
+# PHOTON_MODULE_<name>_ENABLED properties these declarations record, so the switch
+# is the only place anyone decides whether blk is in the build and everything under
+# blk/ follows it.
 photon_module(blk
+        OPTION  PHOTON_ENABLE_BLK
         SOURCES blk/nbd.cpp)
 photon_module(blk_utils
+        OPTION  PHOTON_ENABLE_BLK
         SOURCES blk/utils.cpp)   # shared blk internals: the portable leaf helpers
                                  # (needed by all-platform nbd.cpp) plus, under
                                  # #ifdef __linux__, the genetlink client and the
                                  # virtio-blk core of vduse/vhost-user
 photon_module(blk_vhost_user
+        OPTION  PHOTON_ENABLE_BLK
         ENABLE  LINUX   # eventfd + SCM_RIGHTS fd passing + memfd guest memory
         SOURCES blk/vhost-user.cpp)
 photon_module(blk_tcmu
+        OPTION  PHOTON_ENABLE_BLK
         ENABLE  LINUX
         SOURCES blk/tcmu.cpp)
 photon_module(blk_ublk
+        OPTION  PHOTON_ENABLE_BLK
         ENABLE  LINUX AND PHOTON_ENABLE_URING   # ublk's rings go through the iouring engine
         SOURCES blk/ublk.cpp)
 photon_module(blk_vduse
+        OPTION  PHOTON_ENABLE_BLK
         ENABLE  LINUX
         SOURCES blk/vduse.cpp)
 photon_module(testing
@@ -386,12 +407,13 @@ endif ()
 # without this block being edited. PHOTON_MODULE_<name>_ENABLED is the property
 # photon_module() records and the same one photon_module_targets() and
 # photon_module_link_into() gate on, so "this transport is in the build" has one
-# meaning rather than two that can drift. Both transports' ENABLE is LINUX today,
-# so the effective condition is unchanged -- but the reason each tool needs Linux
-# is not the transport's reason. vhost-user-cli draws blk_vhost_user's symbols
-# (new_vhost_user_controller, VhostUserController::Config); vduse-cli draws no
-# symbol from blk/vduse.cpp and needs it for <linux/virtio_blk.h> and
-# <linux/virtio_config.h>. Restating LINUX here would have been a third
+# meaning rather than two that can drift. Both transports' gate today is
+# PHOTON_ENABLE_BLK AND LINUX, and this block names neither: switching blk off
+# drops both tools exactly as narrowing the transports' ENABLE would. But the
+# reason each tool needs Linux is not the transport's reason. vhost-user-cli draws
+# blk_vhost_user's symbols (new_vhost_user_controller, VhostUserController::Config);
+# vduse-cli draws no symbol from blk/vduse.cpp and needs it for <linux/virtio_blk.h>
+# and <linux/virtio_config.h>. Restating LINUX here would have been a third
 # independent gate for two tools that each have their own.
 #
 # Both keep .cc even though they ARE build targets, an exception to AGENTS.md's
@@ -448,7 +470,17 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(net/http/test)
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
-    add_subdirectory(blk/test)
+    # The blk suites test the blk transports, so they follow the same one switch.
+    # PHOTON_MODULE_blk_ENABLED IS PHOTON_ENABLE_BLK -- module blk carries no ENABLE
+    # clause of its own -- read here as the recorded property rather than restated,
+    # so the test tree and the library cannot disagree about whether blk is in the
+    # build. The gate is load-bearing, not tidy: blk/test/harness.cpp calls
+    # blk::run_off_vcpu, defined in blk/utils.cpp, and every suite below compiles
+    # harness.cpp, so with the switch off nothing here would link.
+    get_property(_blk_enabled GLOBAL PROPERTY PHOTON_MODULE_blk_ENABLED)
+    if (_blk_enabled)
+        add_subdirectory(blk/test)
+    endif ()
     add_subdirectory(net/security-context/test)
     if (NOT APPLE)
         add_subdirectory(fs/cache/test)

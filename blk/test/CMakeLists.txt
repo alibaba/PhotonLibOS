@@ -2,43 +2,68 @@
 # (implementations), compiled into each test binary
 set(BLK_TEST_SRC harness.cpp)
 
+# This directory is reached only when blk is in the build -- the top-level
+# CMakeLists gates add_subdirectory(blk/test) on PHOTON_MODULE_blk_ENABLED, which is
+# PHOTON_ENABLE_BLK -- so that switch is not restated here, and neither is any
+# transport's target condition. Each per-transport suite below reads its own
+# transport's PHOTON_MODULE_<name>_ENABLED, the property photon_module() records and
+# photon_module_targets() gates the library on, so a suite is built exactly where the
+# code it tests is and neither side keeps a second copy of the condition to drift.
+
 # checks of the helpers themselves (the stress block format, its validator and
-# failure classifier): pure logic, so they run on all platforms. Named for what it
-# tests -- a bare "test-blk" read like a sibling of the per-transport suites.
+# failure classifier): pure logic, so they run wherever blk is built. Named for what
+# it tests -- a bare "test-blk" read like a sibling of the per-transport suites.
 photon_add_test(test-blk-harness test-harness.cpp ${BLK_TEST_SRC})
 
 # the WorkPool primitives every transport hands its serving coroutines to; no
-# transport and no kernel involvement, so it runs on all platforms like the
+# transport and no kernel involvement, so it runs wherever blk is built, like the
 # harness checks do
 photon_add_test(test-blk-pool test-blk-pool.cpp ${BLK_TEST_SRC})
 
 photon_add_test(test-blk-nbd test-nbd.cpp ${BLK_TEST_SRC})
+
+# The shared virtio execution engine both virtio transports sit on: a vring in
+# this process's memory, no transport and no kernel, so the request-parsing and
+# notification-ordering decisions are reachable without a frontend mock deciding
+# what a legal request looks like. The engine needs neither, but its definitions
+# sit under #ifdef __linux__ in blk_utils alongside the virtio core they serve,
+# while blk/utils.h declares the class unconditionally. So on other platforms
+# this test compiles and then fails to link -- gate it here rather than let the
+# declaration promise a definition that is not there. This is the one suite with no
+# module property to read: blk_utils is enabled wherever blk is, on every platform,
+# because nbd.cpp needs its portable half, and the LINUX-only virtio core sitting
+# beside that half is not separately gated.
 if (LINUX)
-    # The shared virtio execution engine both virtio transports sit on: a vring in
-    # this process's memory, no transport and no kernel, so the request-parsing and
-    # notification-ordering decisions are reachable without a frontend mock deciding
-    # what a legal request looks like. The engine needs neither, but its definitions
-    # sit under #ifdef __linux__ in blk_utils alongside the virtio core they serve,
-    # while blk/utils.h declares the class unconditionally. So on other platforms
-    # this test compiles and then fails to link -- gate it here rather than let the
-    # declaration promise a definition that is not there.
     photon_add_test(test-blk-vq test-blk-vq.cpp ${BLK_TEST_SRC})
-    # tcmu is LINUX-gated (blk_tcmu), so its symbols are absent from photon_shared
-    # on other platforms; only build the test where the transport exists.
+endif ()
+
+get_property(_suite_tcmu GLOBAL PROPERTY PHOTON_MODULE_blk_tcmu_ENABLED)
+if (_suite_tcmu)
     photon_add_test(test-blk-tcmu test-tcmu.cpp ${BLK_TEST_SRC})
-    # test-vduse.cpp includes blk/vduse.cpp TEXTUALLY, so this binary defines the vduse
-    # transport itself instead of importing it from photon_shared. The note at the top of
-    # that file carries the full argument, what it costs, and the two `nm` commands that
-    # show it; the short version is that several ungated cases at its bottom need symbols
-    # that are file-local to vduse.cpp and in no header, and the note at the top of that
-    # file names them. vduse.cpp's three observation seams are read-only, so they can
-    # report the mapping byte counts but can neither install a mapping nor drive a tick.
+endif ()
+
+# test-vduse.cpp includes blk/vduse.cpp TEXTUALLY, so this binary defines the vduse
+# transport itself instead of importing it from photon_shared. The note at the top of
+# that file carries the full argument, what it costs, and the two `nm` commands that
+# show it; the short version is that several ungated cases at its bottom need symbols
+# that are file-local to vduse.cpp and in no header, and the note at the top of that
+# file names them. vduse.cpp's three observation seams are read-only, so they can
+# report the mapping byte counts but can neither install a mapping nor drive a tick.
+get_property(_suite_vduse GLOBAL PROPERTY PHOTON_MODULE_blk_vduse_ENABLED)
+if (_suite_vduse)
     photon_add_test(test-blk-vduse test-vduse.cpp ${BLK_TEST_SRC})
+endif ()
+
+get_property(_suite_vhost_user GLOBAL PROPERTY PHOTON_MODULE_blk_vhost_user_ENABLED)
+if (_suite_vhost_user)
     photon_add_test(test-blk-vhost-user test-vhost-user.cpp ${BLK_TEST_SRC})
-    if (PHOTON_ENABLE_URING)
-        # ublk additionally rides the iouring engine (blk_ublk's ENABLE)
-        photon_add_test(test-blk-ublk test-ublk.cpp ${BLK_TEST_SRC})
-    endif ()
+endif ()
+
+# ublk additionally rides the iouring engine, and that requirement is blk_ublk's
+# ENABLE, so it is already inside the property this reads.
+get_property(_suite_ublk GLOBAL PROPERTY PHOTON_MODULE_blk_ublk_ENABLED)
+if (_suite_ublk)
+    photon_add_test(test-blk-ublk test-ublk.cpp ${BLK_TEST_SRC})
 endif ()
 
 # The two CLI tools -- vduse-cli and vhost-user-cli -- are NOT here and NOT tests:
