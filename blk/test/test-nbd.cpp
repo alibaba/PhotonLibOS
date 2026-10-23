@@ -74,9 +74,8 @@ struct NbdTestClient {
     // hs_out what each direction actually moved -- a partial count is a peer that
     // stopped mid-message, a zero is a peer that never spoke. hs_word is the reply
     // type when a header parsed, and the high 32 bits of what arrived when its
-    // magic did not; either way it is what tells a transport failure from a
-    // well-formed NBD error reply, since both return -1 and the error reply leaves
-    // errno holding the previous fd wait's EOK.
+    // magic did not -- which is what tells a transport failure from a well-formed
+    // NBD error reply, and names the reply when it was one.
     enum : int {
         HS_IDLE = 0, HS_GREETING, HS_GREET_MAGIC, HS_CFLAGS, HS_OPT_HEADER,
         HS_OPT_PAYLOAD, HS_REP_HEADER, HS_REP_MAGIC, HS_REP_PAYLOAD, HS_REP_REFUSED,
@@ -206,7 +205,7 @@ struct NbdTestClient {
         hs_stage = HS_GREET_MAGIC;
         if (be64rd(hdr) != NBD_INIT_MAGIC || be64rd(hdr + 8) != NBD_OPTS_MAGIC) {
             hs_word = (uint32_t)(be64rd(hdr) >> 32);
-            return -1;
+            return bad_wire();
         }
         char cf[4];
         be32wr(cf, NBD_FLAG_C_FIXED_NEWSTYLE | NBD_FLAG_C_NO_ZEROES);
@@ -275,7 +274,7 @@ struct NbdTestClient {
         if (read_exact(rh, sizeof(rh)) < 0)
             return -1;
         if (be64rd(rh) != NBD_REP_MAGIC)
-            return -1;
+            return bad_wire();
         *type_out = be32rd(rh + 12);
         uint32_t len = be32rd(rh + 16);
         data_out->resize(len);
@@ -323,7 +322,7 @@ struct NbdTestClient {
             hs_stage = HS_REP_MAGIC;
             if (be64rd(rh) != NBD_REP_MAGIC) {
                 hs_word = (uint32_t)(be64rd(rh) >> 32);
-                return -1;
+                return bad_wire();
             }
             uint32_t type = be32rd(rh + 12);
             uint32_t len = be32rd(rh + 16);
@@ -335,7 +334,7 @@ struct NbdTestClient {
                 return -1;
             if (type & (1u << 31)) {
                 hs_stage = HS_REP_REFUSED;
-                return -1;
+                return bad_wire();
             }
             if (type == NBD_REP_INFO && len >= 2) {
                 uint16_t info = be16rd(d.data());
@@ -382,7 +381,7 @@ struct NbdTestClient {
         if (read_exact(rep, sizeof(rep)) < 0)
             return -1;
         if (be32rd(rep) != NBD_SIMPLE_REP_MAGIC || be64rd(rep + 8) != handle)
-            return -1;
+            return bad_wire();
         uint32_t err = be32rd(rep + 4);
         if (type == NBD_CMD_READ && err == NBD_SUCCESS && read_exact(buf, len) < 0)
             return -1;
@@ -418,11 +417,11 @@ struct NbdTestClient {
         if (read_exact(rep, sizeof(rep)) < 0)
             return -1;
         if (be32rd(rep) != NBD_SIMPLE_REP_MAGIC)
-            return -1;
+            return bad_wire();
         uint64_t handle = be64rd(rep + 8);
         auto it = pending.find(handle);
         if (it == pending.end())
-            return -1;
+            return bad_wire();
         uint32_t err = be32rd(rep + 4);
         if (it->second.type == NBD_CMD_READ && err == NBD_SUCCESS &&
             read_exact(it->second.buf, it->second.len) < 0)
@@ -451,6 +450,22 @@ private:
             return 0;
         if (r >= 0)
             errno = ECONNRESET;
+        return -1;
+    }
+    // A failed value check is not a socket error, so nothing on the path below it
+    // sets errno -- errno still holds residue from whatever ran before, and WHICH
+    // residue that is depends on the path. On a TCP read that had to wait for an
+    // event it is photon's EOK sentinel, ENXIO (io/fd-events.h): the event engines
+    // hand that value to thread_interrupt to mean "your fd is ready", and a
+    // successful wait returns 0 without clearing it (io/kqueue.cpp's and
+    // io/epoll.cpp's wait_for_fd_readable both do). With the bytes already buffered
+    // it has been measured as ENOENT instead. Neither names the failure and both
+    // look like real error codes, so both read as if they did. EPROTO is what
+    // blk/nbd.cpp itself reports for an illegal peer message -- its option-length
+    // check -- so that is what these report too, and a caller can then tell a
+    // wire-format failure from a transport one by errno alone.
+    static int bad_wire() {
+        errno = EPROTO;
         return -1;
     }
     int read_exact(void* buf, size_t n) {
@@ -485,6 +500,42 @@ private:
         return 0;
     }
 };
+
+// A peer that is not an nbd server. Both halves of a socketpair come back as photon
+// streams: one is installed in the client's public `s`, so its read_exact() reads
+// exactly the bytes written here, and the other is returned as the peer, already
+// holding `script`. No listener and no port, because the question is what the CLIENT
+// reports about bytes that are not nbd, and a real device never sends them -- so
+// there is no server to connect to, and `s` is assigned directly instead of being
+// reached through connect_tcp(). nbd.cpp builds the same pair itself for both of its
+// loopback attaches (attach_loopback_legacy and attach_loopback_netlink), which is
+// where the idiom comes from. The caller owns the returned stream; `cli` owns the
+// half it was handed and closes it.
+static net::ISocketStream* wire_peer(NbdTestClient& cli, const void* script, size_t n) {
+    int sp[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0)
+        return nullptr;
+    net::ISocketStream* peer = net::new_kernel_socket_stream(sp[0]);
+    net::ISocketStream* mine = net::new_kernel_socket_stream(sp[1]);
+    if (!peer || !mine) {
+        // new_kernel_socket_stream leaves the fd unowned when it fails, so the one
+        // that got no wrapper still has to be closed here
+        if (!peer) ::close(sp[0]);
+        if (!mine) ::close(sp[1]);
+        delete peer;
+        delete mine;
+        return nullptr;
+    }
+    cli.s = mine;
+    // bounded, so that a script shorter than what the client reads fails the case
+    // instead of hanging it
+    cli.set_timeout(5ull * 1000 * 1000);
+    if (peer->write(script, n) != (ssize_t)n) {
+        delete peer;
+        return nullptr;
+    }
+    return peer;
+}
 
 static const char IMG_PATH[] = "/tmp/photon-blk-nbd-test.img";
 static const char IMG2_PATH[] = "/tmp/photon-blk-nbd-test2.img";
@@ -1603,7 +1654,7 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
                 size_t hs_want = 0, hs_in = 0, hs_out = 0;
                 NbdTestClient::Peek pk;
                 char rxdump[3 * 128 + 1] = "";
-                uint16_t self_port = 0;   // this client's local port; nbd.cpp logs no peer
+                uint16_t self_port = 0;   // the join key: serve_conn logs this peer
                 {
                     NbdTestClient cli;
                     if (cli.connect_tcp("127.0.0.1", p0) != 0) {
@@ -2316,6 +2367,110 @@ TEST_F(NbdTest, a_server_close_mid_handshake_reports_the_close_not_a_leftover_er
     int e = errno;
     cli.force_close();
     EXPECT_EQ(ECONNRESET, e) << "a peer that closed mid-handshake reported errno " << e;
+}
+
+// The other half of that, and the half bad_wire() exists for: a peer whose bytes are
+// not nbd at all. Nothing below a failed VALUE check sets errno -- the read that
+// delivered the bytes succeeded -- so what such a failure reports is residue, and the
+// residue is not even a constant. On the TCP path, in the instrumented runs behind
+// the pooled-handshake diagnosis, every failure at a value-check stage reported
+// ENXIO (6), photon's EOK sentinel, and every failure at a timeout stage reported
+// ETIMEDOUT (60), with no counter-example in either direction; that is what
+// identified the value checks as the source. On the socketpair path these three cases
+// use, reverting bad_wire() to a bare `return -1` reports ENOENT (2) instead. Neither
+// number names the failure, and ENXIO reads as "no such device", so a wire-format
+// failure named a device error that had not happened. Revert bad_wire() and all three
+// go red while every other case here still passes, because no other case ever makes
+// one of the seven value checks fail.
+TEST_F(NbdTest, a_peer_that_is_not_nbd_reports_a_protocol_error_not_a_leftover_errno) {
+    // The right length for a newstyle greeting and the wrong contents, so read_exact()
+    // completes and the failure is the magic check below it. A shorter script would
+    // leave that read waiting for bytes the peer never sends -- wire_peer holds the
+    // connection open, so there is no EOF to report -- and the case would fail on the
+    // 5-second timeout instead, in a different branch.
+    char script[18];
+    memset(script, 0x5a, sizeof(script));
+
+    NbdTestClient cli;
+    auto peer = wire_peer(cli, script, sizeof(script));
+    ASSERT_NE(nullptr, peer);
+    DEFER(delete peer);
+
+    int rc = cli.handshake_front();
+    // Taken before any assertion rather than after: a failed EXPECT formats its
+    // operands, and that path is free to clobber errno.
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EPROTO, e) << "a peer that is not nbd reported errno " << e;
+    EXPECT_EQ(NbdTestClient::HS_GREET_MAGIC, cli.hs_stage);
+    // hs_word's second meaning: not a reply type -- there was no reply -- but the
+    // high 32 bits of what arrived. The case below asserts the same meaning one stage
+    // later, on the value the field log recorded.
+    EXPECT_EQ(be32rd(script), cli.hs_word);
+    cli.force_close();
+}
+
+// The same check one stage later, on the failing header the field log recorded:
+// `died in reply-magic hs_word=196608 hs_want=20`. 196608 is 0x00030000, which
+// against NBD_REP_MAGIC's high half 0x0003e889 is the first two bytes right and the
+// next six not -- a header that is nearly an option reply and is not one. That
+// client's hs_in was 58, so it had already read one whole reply before the desynced
+// one; here the desynced header is the first, and hs_word is what the two share. A
+// greeting that parses comes first, so the failure is the reply's magic, not the
+// greeting's.
+TEST_F(NbdTest, a_reply_header_that_almost_matches_the_magic_reports_the_bytes_it_got) {
+    char script[18 + 20];
+    be64wr(script, NBD_INIT_MAGIC);
+    be64wr(script + 8, NBD_OPTS_MAGIC);
+    be64wr(script + 18, NBD_REP_MAGIC & 0xffff000000000000ull);
+    // the option, type and length behind the magic: read into the header and never
+    // looked at, because the magic check fails first
+    memset(script + 26, 0, sizeof(script) - 26);
+
+    NbdTestClient cli;
+    auto peer = wire_peer(cli, script, sizeof(script));
+    ASSERT_NE(nullptr, peer);
+    DEFER(delete peer);
+
+    int rc = cli.handshake();
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EPROTO, e) << "a header that is not an option reply reported errno " << e;
+    EXPECT_EQ(NbdTestClient::HS_REP_MAGIC, cli.hs_stage);
+    EXPECT_EQ(196608u, cli.hs_word);
+    cli.force_close();
+}
+
+// The refusal check in handshake(), and the only one of the seven value checks a
+// conforming server can reach: an answer whose type carries the refusal bit. Every
+// other handshake() call in this file names the configured export, or defaults to
+// that same name, so none of them is ever refused and before this case the branch had
+// never run. It is also the only place hs_word's FIRST meaning is asserted -- a reply
+// type that parsed -- since until these three cases nothing in the file read hs_word
+// except the stress-failure log line, which reports it without checking it. The bytes
+// are what nbd.cpp itself sends for an export it does not serve, so this is the client
+// half of that exchange.
+TEST_F(NbdTest, a_refused_option_reply_is_a_protocol_error_and_names_the_reply) {
+    char script[18 + 20];
+    be64wr(script, NBD_INIT_MAGIC);
+    be64wr(script + 8, NBD_OPTS_MAGIC);
+    be64wr(script + 18, NBD_REP_MAGIC);
+    be32wr(script + 26, NBD_OPT_GO);
+    be32wr(script + 30, NBD_REP_ERR_UNKNOWN);
+    be32wr(script + 34, 0);   // no payload, so the refusal check is the next thing to run
+
+    NbdTestClient cli;
+    auto peer = wire_peer(cli, script, sizeof(script));
+    ASSERT_NE(nullptr, peer);
+    DEFER(delete peer);
+
+    int rc = cli.handshake();
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EPROTO, e) << "a refused option reply reported errno " << e;
+    EXPECT_EQ(NbdTestClient::HS_REP_REFUSED, cli.hs_stage);
+    EXPECT_EQ((uint32_t)NBD_REP_ERR_UNKNOWN, cli.hs_word);
+    cli.force_close();
 }
 
 // Every connection coroutine is joinable, because cleanup_runtime has to be able to

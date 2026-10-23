@@ -762,6 +762,23 @@ struct NbdDeviceImpl : NbdDevice {
         }
     }
 
+    // The peer's endpoint, or an undefined one when there is no IP peer to name.
+    // getpeername(EndPoint&) SUCCEEDS on an AF_UNIX connection: net/basic_socket.h's
+    // sockaddr_storage::to_endpoint fills an EndPoint only for AF_INET and AF_INET6
+    // and default-constructs one otherwise, so a unix-path client logs as 0.0.0.0:0 --
+    // which reads as "no peer" rather than as a wrong one, and is what the loopback
+    // socketpair logs as too, whether its getpeername fails on an unnamed peer or
+    // succeeds with a family to_endpoint ignores. The reset() covers the failing case.
+    // Returning the endpoint instead of logging it here keeps the syscall inside the
+    // caller's LOG_DEBUG argument list, and LogBuilder runs that list only once its
+    // level check passes, so a build operating above DEBUG never makes the call.
+    static net::EndPoint peer_of(net::ISocketStream* s) {
+        net::EndPoint ep;
+        if (s->getpeername(ep) != 0)
+            ep.reset();
+        return ep;
+    }
+
     void serve_conn(Conn* c) {
         DEFER({
             // no new dispatch past the loop below; wait for the in-flight
@@ -778,6 +795,13 @@ struct NbdDeviceImpl : NbdDevice {
             delete c;
             retire_self();
         });
+
+        // The server's half of a correlation with a client that reports its own local
+        // port: which fd and which peer this coroutine took, and which vcpu it runs
+        // on -- the last is what separates "served on the caller's vcpu" from "served
+        // on a pool one" without reading the config back.
+        LOG_DEBUG("nbd: serving fd ` for peer ` on vcpu `", c->s->get_underlay_fd(),
+                  peer_of(c->s), photon::get_vcpu());
 
         if (c->negotiate && negotiate(c) < 0)
             return;
@@ -1441,6 +1465,19 @@ struct NbdDeviceImpl : NbdDevice {
             return -1;
         if (len && s->write(data, len) != (ssize_t)len)
             return -1;
+        // Every option reply leaves through here, so this is the server's own record
+        // of what it actually put on the wire during negotiation -- the client side
+        // of a handshake failure can only report what it received, and the two are
+        // not the same question. Logged after both writes rather than before: the
+        // line claims the reply went out, so a reply whose write failed leaves no
+        // line, and its absence is the evidence. The byte total is reconstructible
+        // from these lines -- an 18-byte greeting, then sizeof(NbdOptionReply) plus
+        // len per reply -- which is what makes a client's received count comparable
+        // against the server's sent one. Arguments sit inside the macro on purpose:
+        // LogBuilder evaluates them only once its level check passes, so a build
+        // running above DEBUG pays nothing here.
+        LOG_DEBUG("nbd: sent option ` reply type ` len ` on fd `", opt, type, len,
+                  s->get_underlay_fd());
         return 0;
     }
 
