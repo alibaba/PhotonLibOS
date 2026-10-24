@@ -17,12 +17,9 @@ limitations under the License.
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
-<<<<<<< HEAD
-
-=======
 #include <sys/mman.h>
 #include <memory>
->>>>>>> b74c997 ([Backport][main to 0.9] | fix(net): respect explicit UDS path buffer length (#1680) (#1700) (#1708))
+
 #include <photon/common/alog.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
