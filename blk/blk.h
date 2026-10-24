@@ -292,6 +292,12 @@ public:
     // Stop serving but keep the kernel-side registration, so that a later
     // start() (possibly in another process) can take over. Whether anything
     // survives to be taken over is info().backlog.
+    // On a transport whose registration is a filesystem node (vhost-user's
+    // socket), the node stays and the detached object gives up the right to
+    // delete it: a later shutdown() or destruction must not unlink a path a
+    // successor has since bound. Removing such a node is destroy_orphan()'s job,
+    // because deciding whether it may go needs the probe and the identity lock
+    // that only the recovery path takes.
     // wait_pending=true: drain in-flight IO before returning (orderly handover).
     //   This wait has NO deadline, deliberately. What it waits on is the peer's
     //   IO arrival rate, which is not ours to bound: a busy guest, initiator or

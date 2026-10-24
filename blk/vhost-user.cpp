@@ -355,12 +355,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
 
     bool own_backend = false;
     bool started = false;
-    // Set once do_listen() has bound AND listened on sock_path, cleared when the node is
-    // unlinked. Deliberately not `started`: detach() stops serving but keeps the
-    // registration, node included, so a later start() can take over -- and since start()
-    // refuses an occupied path with EEXIST without probing or removing it, keying the
-    // unlink on `started` left start -> detach -> shutdown unable to start again on a
-    // node this device owns. Implies the SERVER role, do_listen() being the only setter.
+    // Set once do_listen() has bound AND listened on sock_path; cleared either when this
+    // device removes the node (release_sock_node) or when detach() hands it to whoever
+    // binds it next (abandon_sock_node). Not derivable from `started`: do_listen() sets
+    // it while start() is still running, before `started = true`, and rollback() has to
+    // be able to remove the node in that window. Implies the SERVER role, do_listen()
+    // being the only setter.
     bool sock_owned = false;
     uint8_t  sector_shift = 9;
     bool     read_only = false;
@@ -459,7 +459,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
     ~VhostUserDeviceImpl() {
         if (started)
             shutdown();
-        // the backstop for a session ended by detach() rather than shutdown()
+        // Backend: detach() hands the session over but still holds the backend, so this
+        // is what ends that hold. Socket node: only for a device that still owns it --
+        // detach() has already given the node up, which is why destruction after a
+        // handover leaves the successor's path alone.
         release_backend();
         release_sock_node();
         // Only here, never in rollback(): a rolled-back device must stay able to
@@ -1902,17 +1905,37 @@ struct VhostUserDeviceImpl : IBlkDevice {
         if (backend_req_fd >= 0) { ::close(backend_req_fd); backend_req_fd = -1; }
     }
 
-    int detach(bool wait_pending) override {
-        if (!started)
-            return 0;
+    // Stop serving and close the listener. `release_node` is the whole difference
+    // between the two public end-of-session calls, and it cannot be derived from
+    // `started` in here: shutdown() is detach(true) plus the removal, so a detach()
+    // that always relinquished would stop every orderly shutdown from removing its
+    // own node, and one that always removed is what let a detached object unlink a
+    // successor's path.
+    void end_session(bool wait_pending, bool release_node) {
         stop_session(wait_pending);
         if (listen_fd >= 0) { ::close(listen_fd); listen_fd = -1; }
         started = false;
+        if (release_node)
+            release_sock_node();
+        else
+            abandon_sock_node();
+    }
+
+    int detach(bool wait_pending) override {
+        if (!started)
+            return 0;
+        end_session(wait_pending, false);
         LOG_INFO("vhost-user device detached, ",
                  make_named_value("sock_path", (const char*)sock_path),
                  "flush=", (int)wait_pending);
         return 0;
     }
+
+    // Stop claiming the node. detach() leaves the socket file for whoever binds it
+    // next, and with it gives up the right to delete it: keeping that right is what
+    // made a later shutdown() or destruction unlink a path a successor had already
+    // bound, taking the successor's frontend off the air while it was still serving.
+    void abandon_sock_node() { sock_owned = false; }
 
     // Give up the socket node this device bound. Idempotent, and a no-op for the CLIENT
     // role, which never sets sock_owned.
@@ -1926,19 +1949,19 @@ struct VhostUserDeviceImpl : IBlkDevice {
 
     int shutdown() override {
         if (started) {
-            detach(true);
+            end_session(true, true);
             LOG_INFO("vhost-user device shut down, ",
                      make_named_value("sock_path", (const char*)sock_path));
         }
-        // outside the `started` test, same reason as release_backend() below
-        release_sock_node();
         // blk.h's start() contract: an owned backend is deleted on shutdown, not
         // only by the destructor. The object outlives a shutdown() and the next
         // start() overwrites the pointer, so releasing it only at destruction leaks
         // the first backend. Outside the `started` test on purpose: a detach()
         // leaves the backend held while the device is not started, and shutdown()
-        // is still the call that ends the session. detach(true) has joined every
-        // serving coroutine by now, so nothing can touch it again.
+        // is still the call that ends the session. end_session(true, ...) has joined
+        // every serving coroutine by now, so nothing can touch it again. The socket
+        // node is the opposite case -- only a session that is still serving removes
+        // it, which is why end_session() takes the difference as a parameter.
         release_backend();
         return 0;
     }
@@ -2008,9 +2031,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
             ::close(listen_fd);
             listen_fd = -1;
         }
-        // only OUR listener's socket file: when do_listen refused the path or failed to
-        // bind it, sock_owned is still false and the node there belongs to someone else
-        // -- do not unlink it (same invariant as ublk's rollback-vs-DEL_DEV)
+        // Only OUR listener's socket file. do_listen() is the only setter, and every
+        // path that ends a session clears the flag -- detach() before it hands the path
+        // over, shutdown() after removing its own node, rollback() here. So a refused
+        // bind reads false even on an object that owned the path in an earlier session,
+        // which is the case that made A's failed restart unlink B's live node. Same
+        // invariant as ublk's rollback-vs-DEL_DEV.
         release_sock_node();
         // virgin state includes backend ownership (the cross-transport rule).
         // sock_path is NOT part of it: it is the identity, fixed at construction.

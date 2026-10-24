@@ -398,6 +398,32 @@ SET_VRING_BASE cursor:
                     # plants and the cursor its seven requests naturally left. In-repo
                     # detection only; nothing here establishes a real-frontend one.
 
+blk/vhost-user.cpp -- socket-path ownership at the end of a session. Two mutants, one
+per half of the same split, and they are partitioned so that neither stands in for the
+other:
+
+    norelinquish    # detach() stops serving but KEEPS sock_owned -- the shape up to
+                    # 6360149646, where the object's own later cleanup could unlink a path
+                    # a successor had already bound. Killed by
+                    # a_detached_object_must_not_delete_the_successors_node at its
+                    # ~VhostUserDeviceImpl() assertion, NOT at the shutdown() one: with the
+                    # flag still set, shutdown() after a detach does nothing at all, because
+                    # that unlink was removed independently (noleavenode's subject), so the
+                    # deletion waits for destruction.
+                    # a_refused_restart_after_handover_keeps_the_successors_node dies here
+                    # too, through start()'s rollback rather than the destructor.
+                    #
+                    # shutdown_after_detach_leaves_the_node_for_destroy_orphan SURVIVES this
+                    # mutant, and that is the attribution rather than a gap: its subject is
+                    # the leave/remove split, not the ownership flag.
+    noleavenode     # shutdown() passes release_node=false, so a session that was still
+                    # serving leaves its node behind and every orderly shutdown becomes a
+                    # leaked registration. Killed by
+                    # shutdown_after_detach_leaves_the_node_for_destroy_orphan at its last
+                    # block, and by a_detached_object_must_not_delete_the_successors_node's
+                    # trailing b->shutdown() check. The refused-restart case survives, which
+                    # is right -- nothing in it depends on shutdown() removing anything.
+
 Run on the VM against ~/PhotonLibOS (a copy, not the repository). The sequence is
 `backup`, then one mutation at a time with a build and a run between it and the next
 `backup`, then `restore`; `restore` and every mutation refuse to run without the
@@ -560,6 +586,10 @@ MUTANTS = {
     "segmaxfull": "vhost-user",
     "snapall": "vhost-user",
     "nobasestore": "vhost-user",
+    # socket-path ownership at the end of a session: detach() hands the node over,
+    # shutdown() removes it. One mutant per half.
+    "norelinquish": "vhost-user",
+    "noleavenode": "vhost-user",
 }
 
 RECV_MSG_MARK = "    int recv_msg(int fd, vhost_user_msg* m, int* fds, int* nfds) {\n"
@@ -634,6 +664,22 @@ CALL_SIGNAL = """                vq_notify(idx);
 
 CALL_SIGNAL_MUTATED = """            }
             vq_start(idx);
+"""
+
+# ---- blk/vhost-user.cpp: the socket node at the end of a session ----------------
+# detach() leaves the node and gives up the deletion right; shutdown() removes the node
+# of a session it is still serving. The two mutants below break one half each.
+
+ABANDON_NODE = """    void abandon_sock_node() { sock_owned = false; }
+"""
+
+ABANDON_NODE_MUTATED = """    void abandon_sock_node() { }
+"""
+
+SHUTDOWN_RELEASES_NODE = """            end_session(true, true);
+"""
+
+SHUTDOWN_LEAVES_NODE = """            end_session(true, false);
 """
 
 # ---- blk/utils.cpp: the shared virtqueue engine, VIRTIO_RING_F_EVENT_IDX ----
@@ -1035,6 +1081,12 @@ def mutate(mode, text):
     elif mode == "nobasestore":
         text = sub_once(text, BASE_STORE, BASE_STORE_IGNORED,
                         "the SET_VRING_BASE handler's store of the frontend's cursor")
+    elif mode == "norelinquish":
+        text = sub_once(text, ABANDON_NODE, ABANDON_NODE_MUTATED,
+                        "the sock_owned clear in abandon_sock_node")
+    elif mode == "noleavenode":
+        text = sub_once(text, SHUTDOWN_RELEASES_NODE, SHUTDOWN_LEAVES_NODE,
+                        "the release_node argument shutdown() passes to end_session")
     else:
         # A mode MUTANTS lists but no branch implements would otherwise fall through
         # and write the text back unchanged, printing MUTATED for a mutation that

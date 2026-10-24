@@ -1575,6 +1575,17 @@ public:
         return rc;
     }
 
+    // A frontend that gets as far as a negotiated session. What the handover cases
+    // need to tell apart is "the node is on disk" and "something is answering on it",
+    // and a stat cannot see the difference.
+    int connect_and_negotiate() {
+        return run_frontend([&](MockFrontend& fe) -> int {
+            if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+            if (!fe.negotiate(false)) return EPROTO;
+            return 0;
+        });
+    }
+
     // the backend-file side of a verification (runs on the vcpu)
     int verify_backend(uint64_t off, const std::vector<char>& expect) {
         std::vector<char> buf(expect.size());
@@ -1774,14 +1785,14 @@ TEST_F(VhostUserTest, repassing_an_owned_backend_after_detach_never_deletes_it_t
     EXPECT_EQ(1, destroyed.load()) << "the owned backend must die exactly once";
 }
 
-// detach() keeps the socket node on purpose, so that a later start() -- possibly another
-// process's -- takes the registration over; shutdown() is the call that ends it. The
-// unlink used to be gated on `started`, which detach() had just cleared, so the node
-// outlived the session. Since start() refuses an occupied path with EEXIST rather than
-// probing or removing it, this device then could not start again on a node it owns, and
-// only destroy_orphan() -- recovery for a node nobody owns -- could clear it. The
-// start -> shutdown half is pinned by config_validation; this is the detached half.
-TEST_F(VhostUserTest, shutdown_after_detach_removes_the_node_so_the_device_can_start_again) {
+// detach() is a handover: it leaves the socket node for the next session and gives up
+// the right to delete it. shutdown() after a detach therefore ends the session without
+// touching the path, and destroy_orphan() -- the call that probes the node and takes the
+// identity lock before removing anything -- is what clears a registration nobody serves.
+// The shape this replaces made that removal unconditional, which is indistinguishable
+// from correct for as long as nothing takes the path over; the two cases below are the
+// successors, and this one is the half with no successor in between.
+TEST_F(VhostUserTest, shutdown_after_detach_leaves_the_node_for_destroy_orphan) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
     auto dev = ctl->new_device(cfg);
@@ -1793,16 +1804,95 @@ TEST_F(VhostUserTest, shutdown_after_detach_removes_the_node_so_the_device_can_s
     EXPECT_EQ(0, ::access(SOCK_PATH, F_OK)) << "detach() is a handover, not an end: the node must survive it";
 
     ASSERT_EQ(0, dev->shutdown());
+    EXPECT_EQ(0, ::access(SOCK_PATH, F_OK))
+        << "shutdown() after detach() removed a node it had already handed over";
+
+    // the node is a real registration, so the product's recovery path is what clears it
+    BlkDevInfo orphan;
+    orphan.identity = SOCK_PATH;
+    ASSERT_EQ(0, ctl->destroy_orphan(orphan));
     errno = 0;
-    EXPECT_NE(0, ::access(SOCK_PATH, F_OK)) << "shutdown() left the socket node behind";
+    EXPECT_NE(0, ::access(SOCK_PATH, F_OK));
     EXPECT_EQ(ENOENT, errno);
 
-    // the point of removing it: the same device starts again on the same path, with no
-    // orphan recovery in between
+    // Only after that does the path bind again. A session that was still serving does
+    // remove its own node, so this half is what stops the fix from turning every
+    // shutdown into a leak.
     ASSERT_EQ(0, dev->start(file));
     EXPECT_EQ(0, ::access(SOCK_PATH, F_OK));
-    EXPECT_EQ(0, dev->shutdown());
+    ASSERT_EQ(0, dev->shutdown());
+    errno = 0;
+    EXPECT_NE(0, ::access(SOCK_PATH, F_OK)) << "a session that was still serving must remove its own node";
+    EXPECT_EQ(ENOENT, errno);
+}
+
+// A detach() hands the path over and ends A's right to delete it. The successor binds
+// the same pathname, so an unlink from A takes a live registration away from a device
+// that is still serving. Both of A's exits are exercised because they are different
+// call sites: shutdown() and ~VhostUserDeviceImpl().
+TEST_F(VhostUserTest, a_detached_object_must_not_delete_the_successors_node) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto* a = ctl->new_device(cfg);
+    auto* b = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, a);
+    ASSERT_NE(nullptr, b);
+    DEFER(delete b);
+    DEFER(delete a);
+
+    ASSERT_EQ(0, a->start(file));
+    ASSERT_EQ(0, a->detach(true));
+
+    BlkDevInfo orphan;
+    orphan.identity = SOCK_PATH;
+    ASSERT_EQ(0, ctl->destroy_orphan(orphan));
+    ASSERT_EQ(0, b->start(file));
+    ASSERT_EQ(0, ::access(SOCK_PATH, F_OK));
+
+    // A ends its session while B is serving on the path A handed over
+    ASSERT_EQ(0, a->shutdown());
+    EXPECT_EQ(0, ::access(SOCK_PATH, F_OK)) << "A's shutdown() unlinked the node B bound";
+    EXPECT_EQ(0, connect_and_negotiate()) << "B's node is present but nothing answers on it";
+
+    // and A's destruction must not do it either
+    delete a;
+    a = nullptr;
+    EXPECT_EQ(0, ::access(SOCK_PATH, F_OK)) << "~VhostUserDeviceImpl() unlinked the node B bound";
+    EXPECT_EQ(0, connect_and_negotiate()) << "B's node is present but nothing answers on it";
+
+    ASSERT_EQ(0, b->shutdown());
     EXPECT_NE(0, ::access(SOCK_PATH, F_OK));
+}
+
+// The refused-restart half of the same handover. do_listen() refuses an occupied path
+// with EEXIST without probing or removing it, and rollback() runs with whatever
+// sock_owned says -- which was still true from A's first session, so a restart that
+// failed for the right reason still deleted B's node on the way out.
+TEST_F(VhostUserTest, a_refused_restart_after_handover_keeps_the_successors_node) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto* a = ctl->new_device(cfg);
+    auto* b = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, a);
+    ASSERT_NE(nullptr, b);
+    DEFER(delete b);
+    DEFER(delete a);
+
+    ASSERT_EQ(0, a->start(file));
+    ASSERT_EQ(0, a->detach(true));
+
+    BlkDevInfo orphan;
+    orphan.identity = SOCK_PATH;
+    ASSERT_EQ(0, ctl->destroy_orphan(orphan));
+    ASSERT_EQ(0, b->start(file));
+
+    errno = 0;
+    EXPECT_EQ(-1, a->start(file));
+    EXPECT_EQ(EEXIST, errno) << "the refusal has to come from the bind, or this case proves nothing";
+    EXPECT_EQ(0, ::access(SOCK_PATH, F_OK)) << "A's rollback unlinked the node B bound";
+    EXPECT_EQ(0, connect_and_negotiate()) << "B's node is present but nothing answers on it";
+
+    ASSERT_EQ(0, b->shutdown());
 }
 
 TEST_F(VhostUserTest, server_basic_io) {
