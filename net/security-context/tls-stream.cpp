@@ -670,9 +670,17 @@ static TLSSocketStream* find_tls_stream(ISocketStream* stream) {
 }
 
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
-// Send `hostname` as SNI, telling the server which certificate to send. Places
-// no constraint on the certificate that comes back.
+static bool is_ip_literal(const char* hostname) {
+    struct in_addr v4;
+    struct in6_addr v6;
+    return inet_pton(AF_INET, hostname, &v4) == 1 ||
+           inet_pton(AF_INET6, hostname, &v6) == 1;
+}
+
+// Send DNS `hostname` as SNI, telling the server which certificate to send.
+// RFC 6066 forbids literal IPv4 and IPv6 addresses in the HostName field.
 static int tls_set_sni(SSL* ssl, const char* hostname) {
+    if (is_ip_literal(hostname)) return 0;
     if (SSL_set_tlsext_host_name(ssl, hostname) != 1)
         LOG_ERROR_RETURN(EINVAL, -1, "failed to set SNI on tls stream, ", VALUE(hostname));
     return 0;
@@ -687,9 +695,7 @@ static int tls_set_verify_host(SSL* ssl, const char* hostname) {
 
     // X509_check_host() never matches iPAddress SANs, so literals take a
     // separate path; without it every IP-literal peer would be rejected.
-    struct in_addr v4;
-    struct in6_addr v6;
-    if (inet_pton(AF_INET, hostname, &v4) == 1 || inet_pton(AF_INET6, hostname, &v6) == 1) {
+    if (is_ip_literal(hostname)) {
         if (X509_VERIFY_PARAM_set1_ip_asc(param, hostname) != 1)
             LOG_ERROR_RETURN(EINVAL, -1, "failed to set verified ip of tls stream, ", VALUE(hostname));
         return 0;
