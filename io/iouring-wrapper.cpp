@@ -229,12 +229,8 @@ public:
                 errno = err_backup.no;
                 return -1;
             }
-<<<<<<< HEAD
             ioCtx cancel_ctx{CURRENT, -1, true, false};
-=======
-            ioCtx cancel_ctx(true, false);
             cancel_ctx.draining = true;
->>>>>>> d92ae33 ([Backport][0.8 to 0.7] | | fix(io): io_uring completion draining and SQE reset fixes (#1671, #1696) (#1693, #1701) (#1704) (#1707))
             io_uring_prep_cancel(sqe, &io_ctx, 0);
             io_uring_sqe_set_data(sqe, &cancel_ctx);
             // No explicit submit here: this engine submits lazily, from

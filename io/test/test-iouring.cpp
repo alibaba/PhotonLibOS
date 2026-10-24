@@ -348,42 +348,9 @@ TEST(perf, DISABLED_read) {
 
 /* Event Engine Tests */
 
-<<<<<<< HEAD
 photon::CascadingEventEngine* new_cascading_engine(bool iouring = false) {
     // return photon::new_iouring_cascading_engine();
     return photon::new_epoll_cascading_engine();
-=======
-class event_engine : public testing::Test {
-protected:
-    void SetUp() override {
-        GTEST_ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT,
-                                        photon::INIT_IO_NONE));
-        engine = photon::new_default_cascading_engine();
-    }
-    void TearDown() override {
-        delete engine;
-        photon::fini();
-    };
-
-    photon::CascadingEventEngine* engine = nullptr;
-};
-
-TEST_F(event_engine, master) {
-    int fd[2];
-    pipe(fd);
-    char buf[1];
-    photon::semaphore sem;
-    auto f = [&] {
-        sem.wait(1);
-        write(fd[1], buf, 1);
-    };
-    photon::thread* sub = photon::thread_create11(f);
-    photon::thread_enable_join(sub);
-    sem.signal(1);
-    LOG_INFO("wait 1s at most");
-    ASSERT_EQ(0, photon::wait_for_fd_readable(fd[0], 1000000));
-    photon::thread_join((photon::join_handle*) sub);
->>>>>>> d92ae33 ([Backport][0.8 to 0.7] | | fix(io): io_uring completion draining and SQE reset fixes (#1671, #1696) (#1693, #1701) (#1704) (#1707))
 }
 
 TEST(event_engine, master) {
@@ -648,8 +615,6 @@ struct CompletionRing {
 };
 
 TEST(iouring_completion, timeout_queue_full_neutralizes_io_sqe) {
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
-    DEFER(photon::fini());
     CompletionRing fixture;
     for (unsigned i = 0; i + 1 < CompletionRing::CAPACITY; ++i) {
         auto sqe = fixture.engine._get_sqe();
@@ -660,7 +625,9 @@ TEST(iouring_completion, timeout_queue_full_neutralizes_io_sqe) {
     auto sqe = fixture.engine._get_sqe();
     ASSERT_NE(nullptr, sqe);
     io_uring_prep_openat(sqe, AT_FDCWD, "/dev/null", O_CLOEXEC, 0);
-    auto result = fixture.engine._async_io(sqe, 1000000, IOSQE_ASYNC);
+    // 0.6 applies ring flags in async_io(), outside _async_io().
+    sqe->flags |= IOSQE_ASYNC;
+    auto result = fixture.engine._async_io(sqe, 1000000);
     auto error = errno;
     EXPECT_EQ(-1, result);
     EXPECT_EQ(EBUSY, error);
@@ -689,7 +656,7 @@ static void interrupted_completion_order(const unsigned* order, unsigned count,
         auto sqe = fixture.engine._get_sqe();
         io_uring_prep_nop(sqe);
         uint64_t timeout = timed ? 1000000 : -1;
-        result = fixture.engine._async_io(sqe, timeout, 0);
+        result = fixture.engine._async_io(sqe, timeout);
         error = errno;
         returned = true;
     });
@@ -731,8 +698,6 @@ static void interrupted_completion_order(const unsigned* order, unsigned count,
 }
 
 TEST(iouring_completion, interrupted_all_completion_orders) {
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
-    DEFER(photon::fini());
     for (int ioResult : {1, -ECANCELED}) {
         for (int cancelResult : {0, -ENOENT, -ECANCELED}) {
             unsigned order[] = {0, 1, 2};
@@ -747,8 +712,6 @@ TEST(iouring_completion, interrupted_all_completion_orders) {
 }
 
 TEST(iouring_completion, untimed_completion_orders) {
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
-    DEFER(photon::fini());
     for (int ioResult : {1, -ECANCELED}) {
         for (int cancelResult : {0, -ENOENT, -ECANCELED}) {
             unsigned order[] = {0, 1};
@@ -763,8 +726,6 @@ TEST(iouring_completion, untimed_completion_orders) {
 }
 
 TEST(iouring_completion, full_submission_queue_completion_orders) {
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
-    DEFER(photon::fini());
     for (int ioResult : {1, -ECANCELED}) {
         unsigned order[] = {0, 1};
         do {
@@ -776,8 +737,6 @@ TEST(iouring_completion, full_submission_queue_completion_orders) {
 }
 
 TEST(iouring_completion, normal_all_completion_orders) {
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
-    DEFER(photon::fini());
     for (int ioResult : {1, -EIO, -ECANCELED}) {
         unsigned order[] = {0, 1};
         do {
@@ -789,7 +748,7 @@ TEST(iouring_completion, normal_all_completion_orders) {
             auto waiter = photon::thread_create11([&] {
                 auto sqe = fixture.engine._get_sqe();
                 io_uring_prep_poll_add(sqe, 0, POLLIN);
-                result = fixture.engine._async_io(sqe, 1000000, 0);
+                result = fixture.engine._async_io(sqe, 1000000);
                 error = errno;
                 returned = true;
             });
@@ -814,8 +773,6 @@ TEST(iouring_completion, normal_all_completion_orders) {
 }
 
 TEST(iouring_completion, interrupted_after_partial_normal_completion) {
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
-    DEFER(photon::fini());
     for (int ioResult : {1, -EIO, -ECANCELED}) {
         for (unsigned first : {0U, 1U}) {
             unsigned order[] = {1U - first, 2};
@@ -828,7 +785,7 @@ TEST(iouring_completion, interrupted_after_partial_normal_completion) {
                 auto waiter = photon::thread_create11([&] {
                     auto sqe = fixture.engine._get_sqe();
                     io_uring_prep_poll_add(sqe, 0, POLLIN);
-                    result = fixture.engine._async_io(sqe, 1000000, 0);
+                    result = fixture.engine._async_io(sqe, 1000000);
                     error = errno;
                     returned = true;
                 });
@@ -866,8 +823,6 @@ TEST(iouring_completion, interrupted_after_partial_normal_completion) {
 }
 
 TEST(iouring_completion, normal_untimed_completion) {
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
-    DEFER(photon::fini());
     for (int ioResult : {1, -EIO}) {
         CompletionRing fixture;
         bool returned = false;
@@ -875,7 +830,7 @@ TEST(iouring_completion, normal_untimed_completion) {
         auto waiter = photon::thread_create11([&] {
             auto sqe = fixture.engine._get_sqe();
             io_uring_prep_poll_add(sqe, 0, POLLIN);
-            result = fixture.engine._async_io(sqe, -1, 0);
+            result = fixture.engine._async_io(sqe, -1);
             error = errno;
             returned = true;
         });
