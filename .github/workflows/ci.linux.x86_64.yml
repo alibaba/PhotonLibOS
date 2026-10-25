@@ -44,6 +44,32 @@ jobs:
                          -D PHOTON_ENABLE_KCP=ON          \
                          -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc)
+      # tcmu, ublk and vduse gate every case on a kernel-side prerequisite and skip when
+      # it is missing. The skip is a log line -- gtest is never told -- so ctest reports
+      # those cases as passed while they did nothing. Load the modules and print what
+      # actually came up. Not fatal: an image without them still runs the other ~230
+      # cases, and the warning below says so when none of the three came up.
+      - name: Load kernel modules for tcmu / ublk / vduse
+        run: |
+          for m in ublk_drv vduse virtio_vdpa target_core_mod target_core_user tcm_loop; do
+            sudo modprobe "$m" 2>/dev/null && echo "ok      $m" || echo "MISSING $m"
+          done
+          grep -q ' /sys/kernel/config ' /proc/mounts ||
+            sudo mount -t configfs none /sys/kernel/config || true
+          echo "--- prerequisites the blk suites check ---"
+          ls -l /dev/ublk-control /dev/vduse/control 2>&1 || true
+          ls -d /sys/kernel/config/target/core 2>&1 || true
+          if command -v vdpa >/dev/null; then echo "present vdpa tool"
+          elif sudo dnf install -q -y iproute >/dev/null 2>&1; then echo "installed vdpa tool"
+          else echo "MISSING vdpa tool"; fi
+          n=0
+          [ -e /dev/ublk-control ] && n=$((n+1)) || true
+          [ -e /dev/vduse/control ] && n=$((n+1)) || true
+          [ -d /sys/kernel/config/target/core ] && n=$((n+1)) || true
+          echo "prerequisites present: $n/3"
+          if [ "$n" -eq 0 ]; then
+            echo "::warning::no privileged blk transport came up; tcmu, ublk and vduse cases will be counted as passed without running"
+          fi
       - name: Test epoll
         run: |
           nohup redis-server &
