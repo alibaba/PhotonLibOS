@@ -128,11 +128,10 @@ ISocketClient* new_tls_client(TLSContext* ctx, ISocketClient* base,
  * @brief Set the hostname a client expects to be talking to.
  *
  * Sends DNS hostnames as SNI (IP literals are not sent as SNI), and binds the
- * peer certificate to it, so that a certificate signed by a trusted CA but issued
- * to some *other* name is
- * rejected. Both a chain check and this name check are needed; a chain check
- * alone only proves the certificate is genuine, not that it belongs to the peer
- * you asked for.
+ * peer certificate to the hostname, so that a certificate signed by a trusted
+ * CA but issued to some *other* name is rejected. Both a chain check and this
+ * name check are needed; a chain check alone only proves the certificate is
+ * genuine, not that it belongs to the peer you asked for.
  *
  * Must be called before the first read/write on the stream, as the client
  * handshake is deferred until then.
