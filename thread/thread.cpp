@@ -759,8 +759,48 @@ namespace photon
     static_assert(offsetof(thread, arg)   == 0x40, "...");
     static_assert(offsetof(thread, start) == 0x48, "...");
 
+    // switch_context() and switch_context_defer() hide a function call inside
+    // an asm statement, so the compiler can not see what happens across it:
+    // other photon threads run in between, and they may change any register
+    // and any memory. So, besides the GPRs, the asm statements must declare
+    // as clobbered all the vector / mask / flag registers that are not
+    // preserved by the switch, as well as "memory". Otherwise the compiler
+    // may keep a value in e.g. %xmm0 across the switch, and get garbage back.
+    // Callee-saved registers are listed too, as the switch does not save them.
+    // See the GCC manual, Extended Asm, "Clobbers and Scratch Registers".
+#if defined(__x86_64__)
+#ifdef __AVX512F__
+#define VECTOR_CLOBBERS_AVX512                                              \
+    "xmm16", "xmm17", "xmm18", "xmm19", "xmm20", "xmm21", "xmm22", "xmm23", \
+    "xmm24", "xmm25", "xmm26", "xmm27", "xmm28", "xmm29", "xmm30", "xmm31", \
+    "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7",
+#else
+#define VECTOR_CLOBBERS_AVX512
+#endif
+#define VECTOR_CLOBBERS VECTOR_CLOBBERS_AVX512                              \
+    "xmm0", "xmm1", "xmm2",  "xmm3",  "xmm4",  "xmm5",  "xmm6",  "xmm7",    \
+    "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"
+#elif defined(__aarch64__) || defined(__arm64__)
+#ifdef __ARM_FEATURE_SVE
+#define VECTOR_CLOBBERS_SVE                                                 \
+    "p0", "p1", "p2",  "p3",  "p4",  "p5",  "p6",  "p7",                    \
+    "p8", "p9", "p10", "p11", "p12", "p13", "p14", "p15",
+#else
+#define VECTOR_CLOBBERS_SVE
+#endif
+#define VECTOR_CLOBBERS VECTOR_CLOBBERS_SVE                                 \
+    "v0",  "v1",  "v2",  "v3",  "v4",  "v5",  "v6",  "v7",                  \
+    "v8",  "v9",  "v10", "v11", "v12", "v13", "v14", "v15",                 \
+    "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23",                 \
+    "v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31"
+#endif
+
 #if defined(__x86_64__)
 #if !defined(_WIN64)
+    // The defer function is called on the stack of `to`, whose %rsp is not
+    // necessarily 16-byte aligned at the switch point, as the compiler is not
+    // aware of the call in asm. So align the stack before calling it, and
+    // restore it (in %rbx, which `to` regards as clobbered) afterwards.
     asm(
 DEF_ASM_FUNC(_photon_switch_context) // (void** rdi_to, void** rsi_from)
 R"(
@@ -777,14 +817,22 @@ R"(
         mov     %rsp, (%rcx)
         mov     (%rdx), %rsp
         pop     %rbp
-        jmp     *%rsi
+        mov     %rsp, %rbx
+        and     $-16, %rsp
+        call    *%rsi
+        mov     %rbx, %rsp
+        ret
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to_th)
 R"(
         mov     (%rdx), %rsp
         pop     %rbp
-        jmp     *%rsi
+        mov     %rsp, %rbx
+        and     $-16, %rsp
+        call    *%rsi
+        mov     %rbx, %rsp
+        ret
 )"
 
 DEF_ASM_FUNC(_photon_thread_stub)
@@ -807,17 +855,26 @@ R"(
 )"
     );
 
+    // The call pushes onto the stack, so skip the 128-byte red zone below
+    // %rsp, where the compiler may keep data in a leaf function (the System V
+    // x86-64 psABI, "The Stack Frame"). It also keeps the red zone of a
+    // switched-out thread from being overwritten by a defer function.
+#define RED_ZONE_SKIP    "lea -128(%%rsp), %%rsp\n\t"
+#define RED_ZONE_RESTORE "\n\tlea 128(%%rsp), %%rsp"
+
     inline void switch_context(thread* from, thread* to) {
         ASAN_SWITCH(to);
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("rsi") = from->stack.pointer_ref();
         register auto t asm("rdi") = _t_;
-        asm volatile("call _photon_switch_context"  // (to, from)
+        asm volatile(RED_ZONE_SKIP
+                     "call _photon_switch_context"  // (to, from)
+                     RED_ZONE_RESTORE
                      : "+r"(t), "+r"(f)
                      :  // "0"(t), "1"(f)
                      : "rax", "rbx", "rcx", "rdx", "r8", "r9", "r10", "r11",
-                       "r12", "r13", "r14", "r15");
+                       "r12", "r13", "r14", "r15", VECTOR_CLOBBERS, "memory");
     }
 
     inline void switch_context_defer(thread* from, thread* to,
@@ -829,14 +886,17 @@ R"(
         register auto t asm("rdx") = _t_;
         register auto a asm("rdi") = arg;
         register auto d asm("rsi") = defer;
-        asm volatile(
+        asm volatile(RED_ZONE_SKIP
             "call _photon_switch_context_defer"  // (arg, defer, to, from)
+            RED_ZONE_RESTORE
             : "+r"(t), "+r"(f), "+r"(a), "+r"(d)
             :  // "0"(t), "1"(f), "2"(a), "3"(d)
             : "rax", "rbx", "r8", "r9", "r10", "r11", "r12", "r13", "r14",
-              "r15");
+              "r15", VECTOR_CLOBBERS, "memory");
     }
 #else // _WIN64
+    // The callee owns a 32-byte shadow space above its return address, and
+    // expects %rsp to be 16-byte aligned before the call (Microsoft x64 ABI).
     asm(
 DEF_ASM_FUNC(_photon_switch_context) // (void** rcx_to, void** rdx_from)
 R"(
@@ -853,18 +913,29 @@ R"(
         mov     %rsp, (%r9)
         mov     (%r8), %rsp
         pop     %rbp
-        jmp     *%rdx
+        mov     %rsp, %rbx
+        and     $-16, %rsp
+        sub     $32, %rsp
+        call    *%rdx
+        mov     %rbx, %rsp
+        ret
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rcx_arg, void (*rdx_defer)(void*), void** r8_to)
 R"(
         mov     (%r8), %rsp
         pop     %rbp
-        jmp     *%rdx
+        mov     %rsp, %rbx
+        and     $-16, %rsp
+        sub     $32, %rsp
+        call    *%rdx
+        mov     %rbx, %rsp
+        ret
 )"
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
+        sub     $32, %rsp
         mov     0x40(%rbp), %rcx
         movq    $0, 0x40(%rbp)
         call    *0x48(%rbp)
@@ -885,8 +956,7 @@ R"(
                      :  // "0"(t), "1"(f)
                      : "rax", "rbx", "rsi", "rdi", "r8", "r9",
                        "r10", "r11", "r12", "r13", "r14", "r15",
-                       "xmm6",  "xmm7",  "xmm8",  "xmm9",  "xmm10",
-                       "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+                       VECTOR_CLOBBERS, "memory");
     }
 
     inline void switch_context_defer(thread* from, thread* to,
@@ -904,8 +974,7 @@ R"(
             :  // "0"(t), "1"(f), "2"(a), "3"(d)
             : "rax", "rbx", "rsi", "rdi", "r10",
               "r11", "r12", "r13", "r14", "r15",
-              "xmm6",  "xmm7",  "xmm8",  "xmm9",  "xmm10",
-              "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+              VECTOR_CLOBBERS, "memory");
     }
 #endif // _WIN64
 
@@ -967,13 +1036,25 @@ R"(
 #pragma GCC diagnostic ignored "-Winline-asm"
 #endif
 
+#ifdef __APPLE__
+    // Apple platforms have a 128-byte red zone below sp, which the frame
+    // record pushed by the switch would overwrite, so skip it.
+#define RED_ZONE_SKIP    "sub sp, sp, #128\n\t"
+#define RED_ZONE_RESTORE "\n\tadd sp, sp, #128"
+#else
+#define RED_ZONE_SKIP
+#define RED_ZONE_RESTORE
+#endif
+
     inline void switch_context(thread* from, thread* to) {
         ASAN_SWITCH(to);
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("x0") = from->stack.pointer_ref();
         register auto t asm("x1") = _t_;
-        asm volatile("bl _photon_switch_context"
+        asm volatile(RED_ZONE_SKIP
+                     "bl _photon_switch_context"
+                     RED_ZONE_RESTORE
                      : "+r"(t), "+r"(f)
                      :  // "0"(t), "1"(f)
                      :  // Callee saved register, make it as clobber to save
@@ -983,7 +1064,7 @@ R"(
                      "x2", "x3", "x4", "x5", "x6", "x7", "x8",
                      // Corouptable register, may change ,should save
                      "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
-                     "x17", "x18");
+                     "x17", "x18", VECTOR_CLOBBERS, "cc", "memory");
     }
 
     inline void switch_context_defer(thread* from, thread* to,
@@ -995,13 +1076,15 @@ R"(
         register auto t asm("x2") = _t_;
         register auto d asm("x1") = defer;
         register auto a asm("x0") = arg;
-        asm volatile("bl _photon_switch_context_defer"
+        asm volatile(RED_ZONE_SKIP
+                     "bl _photon_switch_context_defer"
+                     RED_ZONE_RESTORE
                      : "+r"(t), "+r"(f), "+r"(a), "+r"(d)
                      :  // "0"(t), "1"(f), "2"(a), "3"(d)
                      : "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
                        "x27", "x28", "x29", "x30", "x4", "x5", "x6", "x7", "x8",
                        "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
-                       "x17", "x18");
+                       "x17", "x18", VECTOR_CLOBBERS, "cc", "memory");
     }
 #ifdef __clang__
 #pragma GCC diagnostic pop

@@ -383,7 +383,8 @@ class PhotonThread:
         Stack layout (saved by switch_context):
             [Stack._ptr + 0]  = saved_rbp (push %rbp)
             [Stack._ptr + 8]  = return_addr (call's push)
-            [Stack._ptr + 16] = caller's stack frame
+            [Stack._ptr + 16] = caller's stack frame (x86_64: its 128-byte red zone,
+                                skipped by switch_context before the call)
         
         To enable GDB bt, rsp must skip switch_context's frame entirely.
         Returns: (rsp, rbp, rip) for caller's context
@@ -396,6 +397,8 @@ class PhotonThread:
         rbp = read_ptr(sp)       # caller's rbp
         rip = read_ptr(sp + 8)   # return address (in caller)
         rsp = sp + 16            # skip switch_context's frame, point to caller's stack
+        if not is_aarch64():
+            rsp += 128           # the red zone, restored right at the return address
         
         return rsp, rbp, rip
 
