@@ -14,10 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// utils.cpp: the implementations behind utils.h. Compiled on EVERY platform
-// (CMake module blk_utils): section 1 is portable and all-platform nbd.cpp
-// calls it, while sections 2 and 3 -- the generic-netlink client and the
-// virtio-blk device-model core -- are Linux ABI and sit inside #ifdef __linux__.
+// utils.cpp: the implementations behind utils.h. Compiled on every POSIX platform
+// (CMake module blk_utils, ENABLE NOT WIN32): section 1 is portable and nbd.cpp calls
+// it, section 2 is the device lock -- flock(), so POSIX rather than Linux, and outside
+// the guard -- plus the generic-netlink client, and section 3 is the virtio-blk
+// device-model core. The last two are Linux ABI and sit inside #ifdef __linux__.
 
 #include "utils.h"
 
