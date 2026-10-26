@@ -766,8 +766,19 @@ namespace photon
     // as clobbered all the vector / mask / flag registers that are not
     // preserved by the switch, as well as "memory". Otherwise the compiler
     // may keep a value in e.g. %xmm0 across the switch, and get garbage back.
-    // Callee-saved registers are listed too, as the switch does not save them.
-    // See the GCC manual, Extended Asm, "Clobbers and Scratch Registers".
+    //
+    // Note that the ABI's caller-saved (volatile) registers, e.g. all xmm on
+    // x86-64 SysV, are NOT implied clobbered here, as the compiler does not
+    // treat an asm statement as a call. Nor does the C++ call of these inline
+    // functions help: once inlined, there is no call boundary at all; and
+    // even if not, -fipa-ra (enabled at -O2) lets the caller keep values in
+    // the volatile registers that the callee, as told by these very clobber
+    // lists, does not use. On the other hand, the callee-saved ones (xmm6-15
+    // on Win64, v8-v15 on aarch64) must be listed too, as the switch does not
+    // save them like a real callee would do.
+    //
+    // See the GCC manual, Extended Asm, "Clobbers and Scratch Registers", and
+    // Optimize Options, "-fipa-ra".
 #if defined(__x86_64__)
 #ifdef __AVX512F__
 #define VECTOR_CLOBBERS_AVX512                                              \
