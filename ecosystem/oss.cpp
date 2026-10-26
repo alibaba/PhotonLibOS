@@ -206,8 +206,29 @@ static int error_http_status_to_errno(int status_code) {
   return EIO;
 }
 
+// Extracts the last attempt's diagnostics into `trace`.
+static void fill_request_trace(HTTP_STACK_OP& op, RequestTrace& trace,
+                               bool throttled) {
+  trace.http_code = op.status_code;
+  trace.throttled = throttled || op.status_code == 429;
+  auto& headers = op.resp.headers;
+  auto it = headers.find(OSS_HEADER_KEY_X_OSS_REQUEST_ID);
+  if (it != headers.end())
+    trace.request_id.assign(it.second().data(), it.second().size());
+  it = headers.find(OSS_HEADER_KEY_X_OSS_SERVER_TIME);
+  if (it != headers.end())
+    trace.server_time_ms = estring_view(it.second()).to_uint64();
+  it = headers.find(OSS_HEADER_KEY_X_OSS_QOS_DELAY_TIME);
+  if (it != headers.end())
+    trace.qos_delay_ms = estring_view(it.second()).to_uint64();
+  it = headers.find(OSS_HEADER_KEY_RETRY_AFTER);
+  if (it != headers.end())
+    trace.retry_after_ms = estring_view(it.second()).to_uint64() * 1000;
+}
+
 static int do_http_call(HTTP_STACK_OP& op, const ClientOptions& options,
-                        std::string_view object) {
+                        std::string_view object,
+                        RequestTrace* trace = nullptr) {
   int ret = -1;
   auto retry_times = options.retry_times;
   auto retry_interval = options.retry_base_interval_us;
@@ -216,7 +237,11 @@ static int do_http_call(HTTP_STACK_OP& op, const ClientOptions& options,
   auto qps_limit_total_retry_time =
       std::max(options.request_timeout_us, qps_limit_retry_interval);
 
+  bool throttled = false;
+  DEFER(if (trace) fill_request_trace(op, *trace, throttled));
+  
 __retry:
+  if (trace) trace->attempts++;
   int __saved_errno = errno;
   {
     int r = 0;
@@ -259,6 +284,7 @@ __retry:
       // clang-format on
 
       if (code_view.find("QpsLimitExceeded") != std::string::npos) {
+        throttled = true;
         if (qps_limit_retry_interval > 0) {
           photon::thread_usleep(qps_limit_retry_interval);
           qps_limit_total_retry_time -= qps_limit_retry_interval;
@@ -352,9 +378,11 @@ class OssClientImpl : public Client {
   int delete_bucket();
 
   int list_objects(std::string_view prefix, ListObjectsCallback cb,
-                   ListObjectsParameters = {}, std::string* marker = nullptr);
+                   ListObjectsParameters = {}, std::string* marker = nullptr,
+                   RequestTrace* trace = nullptr);
 
-  int head_object(std::string_view object, ObjectHeaderMeta& meta);
+  int head_object(std::string_view object, ObjectHeaderMeta& meta,
+                  RequestTrace* trace = nullptr);
 
   int fill_meta(HTTP_STACK_OP& op, ObjectMeta& meta);
   int fill_meta(HTTP_STACK_OP& op, ObjectHeaderMeta& meta);
@@ -362,19 +390,23 @@ class OssClientImpl : public Client {
 
   ssize_t get_object_range(std::string_view object, off_t offset,
                            size_t cnt, BodyReader reader,
-                           ObjectHeaderMeta* meta = nullptr);
+                           ObjectHeaderMeta* meta = nullptr,
+                           RequestTrace* trace = nullptr);
 
-  int batch_get_objects(std::vector<GetObjectParameters>& params);
+  int batch_get_objects(std::vector<GetObjectParameters>& params,
+                        RequestTrace* trace = nullptr);
 
   int get_object_ranges(std::string_view object,
-                        std::vector<GetRangeParameters>& ranges);
+                        std::vector<GetRangeParameters>& ranges,
+                        RequestTrace* trace = nullptr);
 
   ssize_t put_object(std::string_view object, size_t cnt,
-                     BodyWriter writer, ObjectUploadOptions& opts);
+                     BodyWriter writer, ObjectUploadOptions& opts,
+                     RequestTrace* trace = nullptr);
 
   ssize_t append_object(std::string_view object, const struct iovec* iov,
-                        int iovcnt, off_t position,
-                        ObjectUploadOptions& opts);
+                        int iovcnt, off_t position, ObjectUploadOptions& opts,
+                        RequestTrace* trace = nullptr);
 
   int copy_object(std::string_view src_object, std::string_view dst_object,
                   ObjectCopyOptions& opts);
@@ -423,15 +455,18 @@ class OssClientImpl : public Client {
   void inject_custom_headers(photon::net::http::Headers& headers);
   int sign_and_call(HTTP_STACK_OP& op, photon::net::http::Verb verb,
                     const OssUrl& oss_url, const StringKV& query_params = {},
-                    bool invalidate_cache = false);
+                    bool invalidate_cache = false,
+                    RequestTrace* trace = nullptr);
 
   int walk_list_results(const SimpleDOM::Node& node, ListObjectsCallback cb);
   int do_list_objects_v2(std::string_view bucket, std::string_view prefix,
                          ListObjectsCallback cb, bool delimiters, int maxKeys,
-                         std::string* marker, std::string_view start_after);
+                         std::string* marker, std::string_view start_after,
+                         RequestTrace* trace = nullptr);
   int do_list_objects_v1(std::string_view bucket, std::string_view prefix,
                          ListObjectsCallback cb, bool delimiters, int maxKeys,
-                         std::string* marker);
+                         std::string* marker,
+                         RequestTrace* trace = nullptr);
 
   int do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url,
                      ObjectCopyOptions& opts);
@@ -600,11 +635,11 @@ void OssClient::inject_custom_headers(photon::net::http::Headers& headers) {
 int OssClient::sign_and_call(HTTP_STACK_OP& op, photon::net::http::Verb verb,
                              const OssUrl& oss_url,
                              const StringKV& query_params,
-                             bool invalidate_cache) {
+                             bool invalidate_cache, RequestTrace* trace) {
   int r = append_auth_headers(verb, oss_url, op.req.headers, query_params,
                               invalidate_cache);
   if (r < 0) return r;
-  return do_http_call(op, m_oss_options, oss_url.object());
+  return do_http_call(op, m_oss_options, oss_url.object(), trace);
 }
 
 int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
@@ -639,7 +674,8 @@ int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
 
 int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view prefix,
                                   ListObjectsCallback cb, bool delimiters, int maxKeys,
-                                  std::string* marker, std::string_view start_after) {
+                                  std::string* marker, std::string_view start_after,
+                                  RequestTrace* trace) {
   if (maxKeys > 1000 || maxKeys <= 0) maxKeys = m_oss_options.max_list_ret_cnt;
   estring_view _mark;
   if (marker) _mark = *marker;
@@ -666,7 +702,7 @@ int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view pref
     query_params.insert({OSS_PARAM_KEY_START_AFTER, escaped_start_after});
   auto oss_url = make_oss_url({}, bucket);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
-  int r = sign_and_call(op, Verb::GET, oss_url, query_params);
+  int r = sign_and_call(op, Verb::GET, oss_url, query_params, false, trace);
   if (r < 0) return r;
 
   auto reader = get_xml_node(op);
@@ -685,7 +721,8 @@ int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view pref
 int OssClient::do_list_objects_v1(std::string_view bucket,
                                   std::string_view prefix,
                                   ListObjectsCallback cb, bool delimiters,
-                                  int maxKeys, std::string* marker) {
+                                  int maxKeys, std::string* marker,
+                                  RequestTrace* trace) {
   if (maxKeys > 1000 || maxKeys <= 0) maxKeys = m_oss_options.max_list_ret_cnt;
   estring_view _mark;
   if (marker) _mark = *marker;
@@ -708,7 +745,7 @@ int OssClient::do_list_objects_v1(std::string_view bucket,
 
   auto oss_url = make_oss_url({}, bucket);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
-  int r = sign_and_call(op, Verb::GET, oss_url, query_params);
+  int r = sign_and_call(op, Verb::GET, oss_url, query_params, false, trace);
   if (r < 0) return r;
 
   auto reader = get_xml_node(op);
@@ -914,7 +951,8 @@ int OssClient::delete_objects(const std::vector<std::string_view>& objects,
 }
 
 int OssClient::list_objects(std::string_view prefix, ListObjectsCallback cb,
-                            ListObjectsParameters params, std::string* nct) {
+                            ListObjectsParameters params, std::string* nct,
+                            RequestTrace* trace) {
   std::string marker;
   int max_keys = params.max_keys;
   if (nct) marker = *nct;
@@ -924,10 +962,10 @@ int OssClient::list_objects(std::string_view prefix, ListObjectsCallback cb,
   do {
     if (params.ver == 2) {
       r = do_list_objects_v2(m_bucket, prefix, cb, params.slash_delimiter,
-                             max_keys, &marker, params.start_after);
+                             max_keys, &marker, params.start_after, trace);
     } else {
       r = do_list_objects_v1(m_bucket, prefix, cb, params.slash_delimiter,
-                             max_keys, &marker);
+                             max_keys, &marker, trace);
     }
     if (r < 0) return r;
   } while (!nct && !marker.empty());
@@ -935,10 +973,11 @@ int OssClient::list_objects(std::string_view prefix, ListObjectsCallback cb,
   return 0;
 }
 
-int OssClient::head_object(std::string_view object, ObjectHeaderMeta& meta) {
+int OssClient::head_object(std::string_view object, ObjectHeaderMeta& meta,
+                           RequestTrace* trace) {
   auto oss_url = make_oss_url(object);
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.url());
-  int r = sign_and_call(op, Verb::HEAD, oss_url);
+  int r = sign_and_call(op, Verb::HEAD, oss_url, {}, false, trace);
   if (r < 0) return r;
   return fill_meta(op, meta);
 }
@@ -1000,11 +1039,11 @@ int OssClient::fill_upload_response(HTTP_STACK_OP& op,
 
 ssize_t OssClient::get_object_range(std::string_view obj_path, off_t offset,
                                     size_t cnt, BodyReader reader,
-                                    ObjectHeaderMeta* meta) {
+                                    ObjectHeaderMeta* meta,
+                                    RequestTrace* trace) {
+  if (cnt == 0) return 0;
   int retry_times = m_oss_options.retry_times;
   auto retry_interval = m_oss_options.retry_base_interval_us;
-
-  if (cnt == 0) return 0;
 
   bool invalidate_cache = false;
 retry:
@@ -1012,7 +1051,7 @@ retry:
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.url());
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard");
   op.req.headers.range(offset, offset + cnt - 1);
-  int r = sign_and_call(op, Verb::GET, oss_url, {}, invalidate_cache);
+  int r = sign_and_call(op, Verb::GET, oss_url, {}, invalidate_cache, trace);
   if (r < 0) {
     if (errno == EACCES && !invalidate_cache) {
       invalidate_cache = true;
@@ -1193,7 +1232,8 @@ int OssClient::read_range_parts(HTTP_STACK_OP& op, std::string_view obj_path,
 }
 
 int OssClient::get_object_ranges(std::string_view obj_path,
-                                 std::vector<GetRangeParameters>& ranges) {
+                                 std::vector<GetRangeParameters>& ranges,
+                                 RequestTrace* trace) {
   if (ranges.size() < 2 || ranges.size() > OSS_MULTI_RANGE_MAX_COUNT)
     LOG_ERROR_RETURN(EINVAL, -1, "` ranges of `, must be within [2, `]",
                      ranges.size(), obj_path, OSS_MULTI_RANGE_MAX_COUNT);
@@ -1226,7 +1266,7 @@ retry:
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_MULTI_RANGE_BEHAVIOR,
                         "multi-range");
   op.req.headers.insert("Range", range_list);
-  int r = sign_and_call(op, Verb::GET, oss_url, {}, invalidate_cache);
+  int r = sign_and_call(op, Verb::GET, oss_url, {}, invalidate_cache, trace);
   if (r < 0) {
     if (errno == EACCES && !invalidate_cache) {
       invalidate_cache = true;
@@ -1427,7 +1467,8 @@ ssize_t Frame::read_data(FrameStream& stream, const struct iovec* iov,
 
 bool Frame::skip(FrameStream& stream) const { return stream.skip_frame(*this); }
 
-int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
+int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params,
+                                 RequestTrace* trace) {
   static std::string_view req_head = "<GetObjectsRequest>";
   static std::string_view req_tail = "</GetObjectsRequest>";
   estring req_list;
@@ -1459,7 +1500,7 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
   op.req.headers.content_length(body_view.sum());
   op.body_writer = {&body_view, &body_writer_cb};
 
-  int r = sign_and_call(op, Verb::POST, oss_url, query_params);
+  int r = sign_and_call(op, Verb::POST, oss_url, query_params, false, trace);
   if (r < 0) return r;
 
   uint32_t read_good_cnt = 0;
@@ -1557,7 +1598,8 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
 }
 
 ssize_t OssClient::put_object(std::string_view object, size_t cnt,
-                              BodyWriter writer, ObjectUploadOptions& opts) {
+                              BodyWriter writer, ObjectUploadOptions& opts,
+                              RequestTrace* trace) {
   auto oss_url = make_oss_url(object);
   auto content_type = lookup_mime_type(object);
 
@@ -1574,7 +1616,7 @@ ssize_t OssClient::put_object(std::string_view object, size_t cnt,
     return 0;
   };
   op.body_writer = body_writer_wrapper;
-  int r = sign_and_call(op, Verb::PUT, oss_url);
+  int r = sign_and_call(op, Verb::PUT, oss_url, {}, false, trace);
   if (r < 0) return r;
   r = verify_crc64_if_needed(op, oss_url.object(), opts.expected_crc64);
   if (r < 0) return r;
@@ -1584,7 +1626,8 @@ ssize_t OssClient::put_object(std::string_view object, size_t cnt,
 
 ssize_t OssClient::append_object(std::string_view object,
                                  const struct iovec* iov, int iovcnt,
-                                 off_t position, ObjectUploadOptions& opts) {
+                                 off_t position, ObjectUploadOptions& opts,
+                                 RequestTrace* trace) {
   iovector_view view((struct iovec*)iov, iovcnt);
   auto cnt = view.sum();
 
@@ -1604,7 +1647,7 @@ ssize_t OssClient::append_object(std::string_view object,
   }
   op.req.headers.content_length(cnt);
   op.body_writer = {&view, &body_writer_cb};
-  int r = sign_and_call(op, Verb::POST, oss_url, query_params);
+  int r = sign_and_call(op, Verb::POST, oss_url, query_params, false, trace);
   if (r < 0) return r;
   r = verify_crc64_if_needed(op, oss_url.object(), opts.expected_crc64);
   if (r < 0) return r;
