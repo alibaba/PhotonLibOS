@@ -40,9 +40,16 @@ public:
      * @param ring_size capacity of the internal lock-free ring buffer for task
      * dispatching (default 65536). Must be > 0; rounded up to the next power of
      * two internally.
+     * @param queue_yield_count maximum yield iterations before queue send/recv
+     * backoff (default 256).
+     * @param queue_yield_us time budget in microseconds for queue send/recv
+     * yielding (default 1024). Also used as the sleep duration when a native
+     * producer cannot enqueue after yielding. A zero count or time budget skips
+     * the bounded yield phase; recv still yields once before parking.
      */
-    explicit WorkPool(size_t vcpu_num, int ev_engine = 0, int io_engine = 0,
-                      int thread_mod = -1, size_t ring_size = 65536);
+    explicit WorkPool(size_t vcpu_num, int ev_engine = 0, int io_engine = 0, int thread_mod = -1,
+                      size_t ring_size = 65536, uint64_t queue_yield_count = 256,
+                      uint64_t queue_yield_us = 1024);
 
     WorkPool(const WorkPool& other) = delete;
     WorkPool& operator=(const WorkPool& rhs) = delete;
