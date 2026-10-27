@@ -808,10 +808,6 @@ namespace photon
 
 #if defined(__x86_64__)
 #if !defined(_WIN64)
-    // The defer function is called on the stack of `to`, whose %rsp is not
-    // necessarily 16-byte aligned at the switch point, as the compiler is not
-    // aware of the call in asm. So align the stack before calling it, and
-    // restore it (in %rbx, which `to` regards as clobbered) afterwards.
     asm(
 DEF_ASM_FUNC(_photon_switch_context) // (void** rdi_to, void** rsi_from)
 R"(
@@ -828,22 +824,14 @@ R"(
         mov     %rsp, (%rcx)
         mov     (%rdx), %rsp
         pop     %rbp
-        mov     %rsp, %rbx
-        and     $-16, %rsp
-        call    *%rsi
-        mov     %rbx, %rsp
-        ret
+        jmp     *%rsi
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to_th)
 R"(
         mov     (%rdx), %rsp
         pop     %rbp
-        mov     %rsp, %rbx
-        and     $-16, %rsp
-        call    *%rsi
-        mov     %rbx, %rsp
-        ret
+        jmp     *%rsi
 )"
 
 DEF_ASM_FUNC(_photon_thread_stub)
@@ -896,8 +884,8 @@ R"(
               "r15", VECTOR_CLOBBERS, "memory");
     }
 #else // _WIN64
-    // The callee owns a 32-byte shadow space above its return address, and
-    // expects %rsp to be 16-byte aligned before the call (Microsoft x64 ABI).
+    // The Win64 thread-entry stub must reserve 32 bytes of shadow space
+    // for its calls to the thread entry and _photon_thread_die.
     asm(
 DEF_ASM_FUNC(_photon_switch_context) // (void** rcx_to, void** rdx_from)
 R"(
@@ -914,24 +902,14 @@ R"(
         mov     %rsp, (%r9)
         mov     (%r8), %rsp
         pop     %rbp
-        mov     %rsp, %rbx
-        and     $-16, %rsp
-        sub     $32, %rsp
-        call    *%rdx
-        mov     %rbx, %rsp
-        ret
+        jmp     *%rdx
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rcx_arg, void (*rdx_defer)(void*), void** r8_to)
 R"(
         mov     (%r8), %rsp
         pop     %rbp
-        mov     %rsp, %rbx
-        and     $-16, %rsp
-        sub     $32, %rsp
-        call    *%rdx
-        mov     %rbx, %rsp
-        ret
+        jmp     *%rdx
 )"
 
 DEF_ASM_FUNC(_photon_thread_stub)
