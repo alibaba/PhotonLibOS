@@ -866,22 +866,13 @@ R"(
 )"
     );
 
-    // The call pushes onto the stack, so skip the 128-byte red zone below
-    // %rsp, where the compiler may keep data in a leaf function (the System V
-    // x86-64 psABI, "The Stack Frame"). It also keeps the red zone of a
-    // switched-out thread from being overwritten by a defer function.
-#define RED_ZONE_SKIP    "lea -128(%%rsp), %%rsp\n\t"
-#define RED_ZONE_RESTORE "\n\tlea 128(%%rsp), %%rsp"
-
     inline void switch_context(thread* from, thread* to) {
         ASAN_SWITCH(to);
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("rsi") = from->stack.pointer_ref();
         register auto t asm("rdi") = _t_;
-        asm volatile(RED_ZONE_SKIP
-                     "call _photon_switch_context"  // (to, from)
-                     RED_ZONE_RESTORE
+        asm volatile("call _photon_switch_context"  // (to, from)
                      : "+r"(t), "+r"(f)
                      :  // "0"(t), "1"(f)
                      : "rax", "rbx", "rcx", "rdx", "r8", "r9", "r10", "r11",
@@ -897,9 +888,8 @@ R"(
         register auto t asm("rdx") = _t_;
         register auto a asm("rdi") = arg;
         register auto d asm("rsi") = defer;
-        asm volatile(RED_ZONE_SKIP
+        asm volatile(
             "call _photon_switch_context_defer"  // (arg, defer, to, from)
-            RED_ZONE_RESTORE
             : "+r"(t), "+r"(f), "+r"(a), "+r"(d)
             :  // "0"(t), "1"(f), "2"(a), "3"(d)
             : "rax", "rbx", "r8", "r9", "r10", "r11", "r12", "r13", "r14",
@@ -1047,25 +1037,13 @@ R"(
 #pragma GCC diagnostic ignored "-Winline-asm"
 #endif
 
-#ifdef __APPLE__
-    // Apple platforms have a 128-byte red zone below sp, which the frame
-    // record pushed by the switch would overwrite, so skip it.
-#define RED_ZONE_SKIP    "sub sp, sp, #128\n\t"
-#define RED_ZONE_RESTORE "\n\tadd sp, sp, #128"
-#else
-#define RED_ZONE_SKIP
-#define RED_ZONE_RESTORE
-#endif
-
     inline void switch_context(thread* from, thread* to) {
         ASAN_SWITCH(to);
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("x0") = from->stack.pointer_ref();
         register auto t asm("x1") = _t_;
-        asm volatile(RED_ZONE_SKIP
-                     "bl _photon_switch_context"
-                     RED_ZONE_RESTORE
+        asm volatile("bl _photon_switch_context"
                      : "+r"(t), "+r"(f)
                      :  // "0"(t), "1"(f)
                      :  // Callee saved register, make it as clobber to save
@@ -1087,9 +1065,7 @@ R"(
         register auto t asm("x2") = _t_;
         register auto d asm("x1") = defer;
         register auto a asm("x0") = arg;
-        asm volatile(RED_ZONE_SKIP
-                     "bl _photon_switch_context_defer"
-                     RED_ZONE_RESTORE
+        asm volatile("bl _photon_switch_context_defer"
                      : "+r"(t), "+r"(f), "+r"(a), "+r"(d)
                      :  // "0"(t), "1"(f), "2"(a), "3"(d)
                      : "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
