@@ -51,6 +51,7 @@ limitations under the License.
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -402,6 +403,31 @@ static int sg_io(const std::string& sd, const uint8_t* cdb, size_t cdb_len,
         EXPECT_EQ(0x24, (r).asc()) << "ASC is not INVALID FIELD IN CDB";        \
     } while (0)
 
+// Whether /dev is the kernel's devtmpfs, the only place the node for a freshly enabled
+// backstore (/dev/uioN) can appear. A container whose /dev is its own tmpfs loads
+// target_core_user and tcm_loop happily -- configfs appears, every module check passes
+// -- and then fails every case at open("/dev/uioN") with ENOENT, which reads as a
+// product failure rather than as an environment one. Unlike ublk and vduse, tcmu has no
+// control node to test instead: target_core_user registers a configfs backend and a
+// genetlink family, no character device.
+static bool dev_is_devtmpfs() {
+    FILE* f = fopen("/proc/self/mounts", "r");
+    if (!f)
+        return false;
+    char line[512], mnt[256], type[64];
+    bool devtmpfs = false;
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "%*s %255s %63s", mnt, type) != 2)
+            continue;
+        if (strcmp(mnt, "/dev") != 0)
+            continue;
+        devtmpfs = strcmp(type, "devtmpfs") == 0;
+        break;
+    }
+    fclose(f);
+    return devtmpfs;
+}
+
 class TcmuTest : public test::SkippableTest {
 public:
     test::TestImage img;
@@ -486,6 +512,8 @@ public:
             return report_skip("target_core_user module not loaded");
         if (::access("/sys/module/tcm_loop", F_OK) != 0)
             return report_skip("tcm_loop module not loaded");
+        if (!dev_is_devtmpfs())
+            return report_skip("/dev is not devtmpfs, so a backstore's /dev/uioN never appears here");
         force_cleanup();  // start from a clean slate
         // after the cleanup, so the startup scan finds nothing to synthesize
         sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS);
