@@ -83,3 +83,8 @@ endif ()
 # than dropping them silently. This note is the only pointer to mutate-blk.py from any
 # tracked file. Nothing here execs vduse-cli: test-vduse.cpp ports its rescue recipe
 # in-tree rather than spawning it.
+#
+# One shell script lives here as well, load-kernel-modules.sh. ci.linux.x86_64.yml runs
+# it before the build: it loads the modules the privileged transports need and records
+# which of them came up, because those suites skip in a log line that ctest counts as a
+# pass. It never installs anything and is never fatal.
