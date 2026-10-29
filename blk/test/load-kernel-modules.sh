@@ -7,21 +7,48 @@
 # -- so ctest counts those cases as passed while they did nothing. Loading the modules
 # here makes the run's own log say which of them came up, and warns when none did.
 #
+# Every action prints what it ran and what came back, including modprobe's own words on
+# failure: "absent from /lib/modules" and "present but refused" need different fixes,
+# and a silent `2>/dev/null` cannot tell them apart.
+#
 # Never fatal, and never installs anything: an image without these modules still runs
 # the other ~230 cases, and a test step is the wrong place to change the machine.
 [ "$(uname -s)" = Linux ] || { echo "not Linux, nothing to load"; exit 0; }
 
 for m in ublk_drv vduse virtio_vdpa target_core_mod target_core_user tcm_loop; do
-    sudo modprobe "$m" 2>/dev/null && echo "ok      $m" || echo "MISSING $m"
+    # Ask first whether the driver is already there, and only load what is missing.
+    # /sys/module/<name> exists for built-in code as well as for loaded modules; the
+    # refcnt file exists only for the latter, so the two are distinguishable without
+    # running modprobe at all.
+    if [ -e "/sys/module/$m/refcnt" ]; then
+        printf '%-16s already loaded\n' "$m"
+    elif [ -d "/sys/module/$m" ]; then
+        printf '%-16s builtin\n' "$m"
+    else
+        printf 'modprobe %-16s ' "$m"
+        if err=$(sudo modprobe "$m" 2>&1); then
+            echo "ok"
+        else
+            echo "FAILED: $(printf '%s' "$err" | tr '\n' ' ')"
+        fi
+    fi
 done
 
-grep -q ' /sys/kernel/config ' /proc/mounts ||
-    sudo mount -t configfs none /sys/kernel/config || true
+if grep -q ' /sys/kernel/config ' /proc/mounts; then
+    echo "configfs /sys/kernel/config   already mounted"
+else
+    printf 'mount -t configfs /sys/kernel/config   '
+    if err=$(sudo mount -t configfs none /sys/kernel/config 2>&1); then
+        echo "ok"
+    else
+        echo "FAILED: $(printf '%s' "$err" | tr '\n' ' ')"
+    fi
+fi
 
 echo "--- prerequisites the blk suites check ---"
 ls -l /dev/ublk-control /dev/vduse/control 2>&1 || true
 ls -d /sys/kernel/config/target/core 2>&1 || true
-if command -v vdpa >/dev/null; then echo "present vdpa tool"; else echo "MISSING vdpa tool"; fi
+if command -v vdpa >/dev/null; then echo "vdpa tool                     present"; else echo "vdpa tool                     MISSING"; fi
 
 n=0
 [ -e /dev/ublk-control ] && n=$((n + 1)) || true
