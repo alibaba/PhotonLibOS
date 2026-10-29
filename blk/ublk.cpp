@@ -1597,12 +1597,22 @@ struct UblkDeviceImpl : IBlkDevice {
                     break;
                 int e = errno;   // captured once: every branch below calls something
                 if (e == EOPNOTSUPP || e == ENOTSUPP) {   // no TRY_STOP_DEV: plain stop
-                    // Do not swallow this: a device that failed to stop is still live,
-                    // and DEL_DEV below does not refuse a live one -- measured, it
-                    // blocks until the last opener closes and then returns success.
-                    // Swallowing the stop failure would therefore hand the caller a 0
-                    // for a teardown that stopped nothing, after a wait whose length
-                    // nothing here bounds.
+                    // STOP_DEV is the blocking one: on a live device it waits for the
+                    // last opener to close (the same unbounded wait DEL_DEV does,
+                    // measured), so a caller that holds the node and waits for
+                    // shutdown() to return deadlocks against itself -- which is exactly
+                    // what a held-open shutdown() is. This kernel gives us no TRY_STOP
+                    // to ask with, so ask the only other way it answers: an exclusive
+                    // open of the node fails with EBUSY while anyone holds it, and
+                    // closing the probe again changes nothing.
+                    if (node_is_held()) {
+                        // same rule as the deadline below: a started device keeps
+                        // serving and keeps the lock; a detached one was only claimed
+                        // for this teardown
+                        if (!started)
+                            release_lock();
+                        LOG_ERROR_RETURN(EBUSY, -1, "ublk device ` is still in use (held open / mounted)", dev_id);
+                    }
                     if (ctrl.stop_dev((uint32_t)dev_id) < 0 && errno != ENODEV)
                         LOG_ERRNO_RETURN(0, -1, "ublk STOP_DEV failed, dev `", dev_id);
                     break;
@@ -1680,6 +1690,21 @@ struct UblkDeviceImpl : IBlkDevice {
     // hold the pointer across another call, as blk.h promises
     const char* get_device_node() override {
         return node_path[0] ? node_path : nullptr;
+    }
+
+    // Whether anyone holds the node open. An exclusive open is the kernel's own answer
+    // and costs one syscall: blkdev_get() refuses it with EBUSY while any opener
+    // exists -- in this process or another -- and never touches the disk. Used where
+    // the kernel offers no TRY_STOP_DEV to ask the same question.
+    bool node_is_held() {
+        const char* node = get_device_node();
+        if (!node)
+            return false;
+        int fd = ::open(node, O_RDONLY | O_EXCL | O_CLOEXEC);
+        if (fd < 0)
+            return errno == EBUSY;
+        ::close(fd);
+        return false;
     }
 
     void rollback() {
