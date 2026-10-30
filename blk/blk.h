@@ -39,6 +39,10 @@ static constexpr uint64_t FEATURE_WRITE_ZEROES  = 1ull << 2;
 // detach(), shutdown(), resize() and an adopting start() would do. Each names the
 // spread rather than promising a common behaviour. Every one of them is a property
 // of the transport, so all four are valid on a constructed device, before start().
+// Two are refined by start() where the answer is the KERNEL's and not the
+// transport's -- ublk's shutdown_refusal and resize_effect, from the flags the driver
+// answered ADD_DEV/GET_DEV_INFO with -- and before start() they name the transport's
+// best case rather than a witness.
 
 // Where a request backlog survives detach() -- that is, what a later start(),
 // possibly in another process, has to harvest. KernelSide: our own registration
@@ -62,15 +66,22 @@ enum class BlkBacklog : uint8_t { None, KernelSide, PeerSide };
 // answers EBUSY and leaves the device alone. Disconnects ends the session itself,
 // and the consumer's next request fails. Unconditional destroys the registration
 // regardless, because this transport's destroy path has no liveness check to
-// consult -- that is the absence of a refusal, not a force option.
-enum class BlkShutdownRefusal : uint8_t { Disconnects, Unconditional, RefusesWhenAttached };
+// consult -- that is the absence of a refusal, not a force option. WaitsForAttached
+// is the fourth answer and the only one that is not the transport's to choose: it
+// carries out the teardown once every opener closes, so a caller that holds the node
+// and waits for shutdown() to return waits for itself. It is what ublk reports on a
+// kernel whose stop primitive has no "are you held?" answer (no TRY_STOP_DEV), and a
+// caller that must not block has to check this axis, not assume the refusal.
+enum class BlkShutdownRefusal : uint8_t { Disconnects, Unconditional, RefusesWhenAttached, WaitsForAttached };
 
 // What a successful resize() delivered. NotifiedOrFailed: the new capacity went
 // through the mechanism that tells the consumer, and a failure there is an error
 // return. BestEffortNotify: our capacity and the bound every queue enforces were
 // updated and the notification was attempted, but a failed notification -- or no
 // notification channel at all -- only logs, so success means "updated here" and not
-// "seen there". Unsupported: resize() is not implemented.
+// "seen there". Unsupported: resize() is not implemented, or the running kernel has
+// no mechanism to carry it (ublk without UBLK_CMD_UPDATE_SIZE), in which case
+// resize() answers EOPNOTSUPP rather than failing inside the transport.
 enum class BlkResizeEffect : uint8_t { Unsupported, BestEffortNotify, NotifiedOrFailed };
 
 // How much of an existing registration start() validates before adopting it, graded by what
@@ -332,11 +343,13 @@ public:
     virtual int detach(bool wait_pending) = 0;
 
     // detach() + destroy the kernel-side registration. What happens while a
-    // consumer is still attached is info().shutdown_refusal, and the three answers
+    // consumer is still attached is info().shutdown_refusal, and the four answers
     // are not interchangeable: RefusesWhenAttached fails with EBUSY and leaves the
     // device alone, Disconnects ends the session itself so that the consumer's next
-    // request fails, and Unconditional destroys the registration because this
-    // transport's destroy path has no liveness check to consult. No transport has a
+    // request fails, Unconditional destroys the registration because this
+    // transport's destroy path has no liveness check to consult, and
+    // WaitsForAttached carries the teardown out once the last opener closes -- which
+    // is the same thing as blocking while one holds it. No transport has a
     // force option. Tearing down an in-use device is data corruption, which is why
     // the refusing transports refuse -- so a caller that depends on the refusal has
     // to check for it rather than assume it, and a caller that must not drop a live

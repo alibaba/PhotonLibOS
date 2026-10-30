@@ -535,6 +535,15 @@ public:
     }
 
     std::vector<char> pattern(uint8_t seed, size_t n = IO_LEN) { return test::pattern(seed, n); }
+
+    // UPDATE_SIZE is a kernel command rather than a transport choice: a driver without
+    // it masks UBLK_F_UPDATE_SIZE off ADD_DEV's reply, and info().resize_effect follows
+    // that (see blk.h). The resize cases then have nothing of OURS to test.
+    const char* resize_unavailable(IBlkDevice* d) {
+        return d->get_info().resize_effect == BlkResizeEffect::Unsupported
+                   ? "this kernel has no UPDATE_SIZE command, so resize() is Unsupported here"
+                   : nullptr;
+    }
 };
 
 // The capability half of BlkDevInfo: what lets a caller branch on behaviour instead of
@@ -558,6 +567,9 @@ TEST_F(UblkConfigTest, capabilities_descriptor) {
     // device alone -- shutdown_busy is the case that pins it. That DEL_DEV itself has no
     // liveness check is destroy_orphan()'s contract, a different operation, and citing
     // it here is what had this axis answering one level below the question blk.h asks.
+    // This is the transport's best case: start() refines it to WaitsForAttached on a
+    // kernel without TRY_STOP_DEV, which is what shutdown_busy reads before it holds a
+    // node open.
     EXPECT_EQ(BlkShutdownRefusal::RefusesWhenAttached, i.shutdown_refusal);
     // UPDATE_SIZE goes through the control channel and a refusal there fails resize()
     EXPECT_EQ(BlkResizeEffect::NotifiedOrFailed, i.resize_effect);
@@ -1588,6 +1600,15 @@ TEST_F(UblkTest, resize_dev) {
     DEFER(delete dev);
     ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());
+    if (const char* why = resize_unavailable(dev)) {
+        // The descriptor is not just a label: on such a kernel resize() answers from
+        // our own capability check, with EOPNOTSUPP, instead of failing inside the
+        // transport on an ioctl the kernel has never heard of.
+        errno = 0;
+        EXPECT_EQ(-1, dev->resize(96ull << 20));
+        EXPECT_EQ(EOPNOTSUPP, errno);
+        return report_skip(why);
+    }
     std::string node = node_of(dev);
 
     constexpr uint64_t NEW_SIZE = 96ull << 20;
@@ -1620,6 +1641,8 @@ TEST_F(UblkTest, resize_recover) {
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
     ASSERT_EQ(0, dev->start(file));
+    if (const char* why = resize_unavailable(dev))
+        return report_skip(why);
     std::string node = node_of(dev);
     uint32_t id = node_dev_id(node.c_str());
     ASSERT_NE(UINT32_MAX, id);
@@ -1662,6 +1685,8 @@ TEST_F(UblkTest, sector_shift_12_resize_and_orphan_report_true_byte_size) {
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
     ASSERT_EQ(0, dev->start(file));
+    if (const char* why = resize_unavailable(dev))
+        return report_skip(why);
     std::string node = node_of(dev);
     uint32_t id = node_dev_id(node.c_str());
     ASSERT_NE(UINT32_MAX, id);
@@ -1698,6 +1723,14 @@ TEST_F(UblkTest, shutdown_busy) {
     DEFER(delete dev);
     ASSERT_EQ(0, dev->start(file));
     std::string node = node_of(dev);
+
+    // TRY_STOP_DEV is what turns "held" into an answer instead of a wait. Without it
+    // STOP_DEV waits for the opener to close, and the opener this case arranges is the
+    // very call that would be waiting -- a deadlock inside the kernel, not a refusal we
+    // could observe. info().shutdown_refusal is start()'s report of which contract this
+    // kernel is under, and this case only exists for the refusing one.
+    if (dev->get_info().shutdown_refusal != BlkShutdownRefusal::RefusesWhenAttached)
+        return report_skip("this kernel has no TRY_STOP_DEV, so shutdown() waits for the holder instead of refusing");
 
     int fd = -1;
     test::run_off_vcpu([&] { fd = ::open(node.c_str(), O_RDONLY); });

@@ -662,6 +662,27 @@ struct UblkDeviceImpl : IBlkDevice {
 
     const BlkDevInfo& get_info() const override { return cfg.info; }
 
+    // What this KERNEL can do, read off the flags it answered ADD_DEV/GET_DEV_INFO with.
+    // Both bits are maskable by the driver's UBLK_F_ALL, so one the running kernel does
+    // not implement comes back clear: the reply is the capability answer, not an echo of
+    // the request. Two axes in blk.h are decided here and nowhere else --
+    //   UBLK_F_SAFE_STOP_DEV  the kernel has UBLK_CMD_TRY_STOP_DEV, i.e. a stop that
+    //                         answers EBUSY while the node has openers instead of waiting
+    //                         for them. The driver force-sets this bit on every device it
+    //                         creates, so it needs no request from us.
+    //   UBLK_F_UPDATE_SIZE    the kernel has UBLK_CMD_UPDATE_SIZE. We request it; a kernel
+    //                         that does not know it masks the bit off.
+    // Before start() there is no reply to read, so the constructor's values stand: the
+    // transport's best case, which is what blk.h promises for a constructed device.
+    void publish_capabilities() {
+        cfg.info.shutdown_refusal = (negotiated_flags & UBLK_F_SAFE_STOP_DEV)
+                                        ? BlkShutdownRefusal::RefusesWhenAttached
+                                        : BlkShutdownRefusal::WaitsForAttached;
+        cfg.info.resize_effect = (negotiated_flags & UBLK_F_UPDATE_SIZE)
+                                     ? BlkResizeEffect::NotifiedOrFailed
+                                     : BlkResizeEffect::Unsupported;
+    }
+
     ~UblkDeviceImpl() {
         if (started || dev_id >= 0) {
             if (shutdown() < 0 && started) {
@@ -1318,6 +1339,7 @@ struct UblkDeviceImpl : IBlkDevice {
             LOG_ERROR_RETURN(0, -1, "ublk ADD_DEV failed, want `", want);
         set_dev_id(info.dev_id);
         negotiated_flags = info.flags;
+        publish_capabilities();
         // ADD_DEV's reply is the NEGOTIATED geometry, not an echo of the request: the
         // driver clamps nr_hw_queues to nr_cpu_ids (the count of POSSIBLE cpus, which a
         // host with offline cpus makes larger than the online count) and rounds
@@ -1363,15 +1385,6 @@ struct UblkDeviceImpl : IBlkDevice {
         // So tear the serving side down here. stop_serving() is a no-op on the
         // empty state the earlier failure points leave.
         DEFER(if (!ok) { int e = errno; stop_serving(false); errno = e; });
-        // the old daemon's quiesce work runs async after its fds close
-        int64_t deadline = cfg.quiesce_timeout_ms;
-        while (ctrl.start_recovery((uint32_t)dev_id) < 0) {
-            if (errno != EBUSY)
-                LOG_ERRNO_RETURN(0, -1, "ublk START_USER_RECOVERY failed, dev `", dev_id);
-            if ((deadline -= 1) <= 0)
-                LOG_ERROR_RETURN(ETIMEDOUT, -1, "ublk device ` never quiesced", dev_id);
-            photon::thread_usleep(1000);
-        }
         ublksrv_ctrl_dev_info info;
         if (ctrl.get_info((uint32_t)dev_id, &info) < 0)
             LOG_ERROR_RETURN(0, -1, "ublk GET_DEV_INFO failed, dev `", dev_id);
@@ -1380,14 +1393,32 @@ struct UblkDeviceImpl : IBlkDevice {
         queue_depth = info.queue_depth;
         max_io_buf_bytes = info.max_io_buf_bytes;
         negotiated_flags = info.flags;
+        publish_capabilities();
         select_ops();
         // An adopted registration may have been created by a daemon that spoke a data
         // plane this loop does not serve; attaching would strand its requests, so
         // refuse the adoption rather than take it over unservable.
         if (negotiated_flags & UBLK_F_UNSUPPORTED_MODES)
             LOG_ERROR_RETURN(EINVAL, -1, "ublk device ` is registered with mode flags ` this transport does not serve", dev_id, negotiated_flags);
+        // Validate BEFORE asking the kernel to let us in. START_USER_RECOVERY is not a
+        // read: it resets the registration's queue state (queue reinit, ready count, the
+        // fetch completion), and an adoption we then refuse would have no way to undo
+        // that -- END_USER_RECOVERY needs a daemon's fetches, which is exactly what we
+        // declined to become. Measured on CI's 6.6 kernel: after a refused adoption, the
+        // next adoption of the same registration failed START_USER_RECOVERY with EINVAL;
+        // this reordering removes the only state-changing call between the two.
         if (validate_params() < 0)
             return -1;
+        // the old daemon's quiesce work runs async after its fds close
+        int64_t deadline = cfg.quiesce_timeout_ms;
+        while (ctrl.start_recovery((uint32_t)dev_id) < 0) {
+            if (errno != EBUSY)
+                LOG_ERRNO_RETURN(0, -1, "ublk START_USER_RECOVERY failed, dev ` state ` flags `",
+                                 dev_id, (int)info.state, info.flags);
+            if ((deadline -= 1) <= 0)
+                LOG_ERROR_RETURN(ETIMEDOUT, -1, "ublk device ` never quiesced", dev_id);
+            photon::thread_usleep(1000);
+        }
         if (open_cdev() < 0)
             return -1;
         make_queues();
@@ -1597,22 +1628,24 @@ struct UblkDeviceImpl : IBlkDevice {
                     break;
                 int e = errno;   // captured once: every branch below calls something
                 if (e == EOPNOTSUPP || e == ENOTSUPP) {   // no TRY_STOP_DEV: plain stop
-                    // STOP_DEV is the blocking one: on a live device it waits for the
-                    // last opener to close (the same unbounded wait DEL_DEV does,
-                    // measured), so a caller that holds the node and waits for
-                    // shutdown() to return deadlocks against itself -- which is exactly
-                    // what a held-open shutdown() is. This kernel gives us no TRY_STOP
-                    // to ask with, so ask the only other way it answers: an exclusive
-                    // open of the node fails with EBUSY while anyone holds it, and
-                    // closing the probe again changes nothing.
-                    if (node_is_held()) {
-                        // same rule as the deadline below: a started device keeps
-                        // serving and keeps the lock; a detached one was only claimed
-                        // for this teardown
-                        if (!started)
-                            release_lock();
-                        LOG_ERROR_RETURN(EBUSY, -1, "ublk device ` is still in use (held open / mounted)", dev_id);
-                    }
+                    // This kernel has no non-blocking stop at all, and there is no other
+                    // way to ask the question from userspace: no flag, no sysfs file and no
+                    // ioctl reports a block device's openers, and an exclusive open is not
+                    // an answer either -- it succeeds on a ublk node whose daemon is the
+                    // caller, because the first open also runs the partition scan this
+                    // transport defers (UBLK_F_NO_AUTO_PART_SCAN), issuing reads only the
+                    // very vcpu now blocked in open() could serve. So STOP_DEV is the only
+                    // stop there is, and on a live device it waits for the last opener to
+                    // close -- the same unbounded wait DEL_DEV does (measured). A caller
+                    // that holds the node therefore deadlocks against itself, which is what
+                    // info().shutdown_refusal reports as WaitsForAttached: the contract is
+                    // "this waits", not "this refuses", on such a kernel.
+                    //
+                    // Do not swallow the failure either: a device that failed to stop is
+                    // still live, and DEL_DEV below does not refuse a live one -- measured,
+                    // it blocks until the last opener closes and then returns success.
+                    // Swallowing would hand the caller a 0 for a teardown that stopped
+                    // nothing.
                     if (ctrl.stop_dev((uint32_t)dev_id) < 0 && errno != ENODEV)
                         LOG_ERRNO_RETURN(0, -1, "ublk STOP_DEV failed, dev `", dev_id);
                     break;
@@ -1676,6 +1709,13 @@ struct UblkDeviceImpl : IBlkDevice {
         uint64_t cur = dev_sectors.load() << UBLK_SECTOR_SHIFT;
         if (new_size == cur)
             return 0;
+        // UPDATE_SIZE is a control command the kernel either has or does not
+        // (UBLK_CMD_UPDATE_SIZE, added after Linux 6.6); a driver without it masks
+        // UBLK_F_UPDATE_SIZE off ADD_DEV's reply, which is what start() read into
+        // info().resize_effect. Answering here rather than letting the ioctl come back
+        // ENOTSUPP names the cause instead of the symptom.
+        if (!(negotiated_flags & UBLK_F_UPDATE_SIZE))
+            LOG_ERROR_RETURN(EOPNOTSUPP, -1, "ublk resize: this kernel has no UPDATE_SIZE command, dev `", dev_id);
         if (new_size < cur)
             LOG_ERROR_RETURN(EINVAL, -1, "ublk resize: shrink (` -> `) is rejected", cur, new_size);
         if (ctrl.update_size((uint32_t)dev_id, new_size >> UBLK_SECTOR_SHIFT) < 0)
@@ -1690,21 +1730,6 @@ struct UblkDeviceImpl : IBlkDevice {
     // hold the pointer across another call, as blk.h promises
     const char* get_device_node() override {
         return node_path[0] ? node_path : nullptr;
-    }
-
-    // Whether anyone holds the node open. An exclusive open is the kernel's own answer
-    // and costs one syscall: blkdev_get() refuses it with EBUSY while any opener
-    // exists -- in this process or another -- and never touches the disk. Used where
-    // the kernel offers no TRY_STOP_DEV to ask the same question.
-    bool node_is_held() {
-        const char* node = get_device_node();
-        if (!node)
-            return false;
-        int fd = ::open(node, O_RDONLY | O_EXCL | O_CLOEXEC);
-        if (fd < 0)
-            return errno == EBUSY;
-        ::close(fd);
-        return false;
     }
 
     void rollback() {
