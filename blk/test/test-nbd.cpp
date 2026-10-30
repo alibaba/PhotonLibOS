@@ -2539,7 +2539,7 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     cfg.enable_tcp = true;
     cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
     cfg.queue_depth = 1;
-    cfg.stall_timeout = 2;
+    cfg.stall_timeout = 2ull * 1000 * 1000;
     auto dev = new_nbd_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -2626,7 +2626,7 @@ TEST_F(NbdTest, a_reply_nobody_reads_drops_the_connection_instead_of_being_disca
     // Lowered from the 30s default, and deliberately: the case has to sit out one whole
     // stall_timeout to watch the reply write fail, and nothing about the finding depends
     // on 30 in particular. At the default this one case would cost half a minute.
-    cfg.stall_timeout = 1;
+    cfg.stall_timeout = 1ull * 1000 * 1000;
     auto dev = new_nbd_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -2687,7 +2687,7 @@ TEST_F(NbdTest, overlapping_reply_guards_restore_the_idle_wait_they_found) {
     // delayed-ACK round rather than a memcpy -- sizing the payload 4x over the bar made
     // the drain alone take longer than a 1 s deadline and the case failed for a reason
     // that had nothing to do with the nesting it exists to pin.
-    cfg.stall_timeout = 3;
+    cfg.stall_timeout = 3ull * 1000 * 1000;
     auto dev = new_nbd_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -2708,7 +2708,7 @@ TEST_F(NbdTest, overlapping_reply_guards_restore_the_idle_wait_they_found) {
     // value the leak cannot produce, or a guard that restored the wrong thing would look
     // exactly like one that restored the right thing and this case would prove nothing.
     uint64_t baseline = conns[0]->timeout();
-    ASSERT_NE((uint64_t)cfg.stall_timeout * 1000 * 1000, baseline);
+    ASSERT_NE(cfg.stall_timeout, baseline);
     int room = 0;
     ASSERT_EQ(0, shut_the_window(cli, dev, &room));
     // Same measured premise as the case above: the first reply has to be too big for
@@ -2760,7 +2760,7 @@ TEST_F(NbdTest, overlapping_reply_guards_restore_the_idle_wait_they_found) {
     // stay above cfg.stall_timeout, or a guard that leaked its deadline onto the idle
     // read would not have had time to kill the connection and this half proves nothing.
     EXPECT_EQ(0, cli.xfer(NBD_CMD_FLUSH, 0, nullptr, 0));
-    photon::thread_usleep((cfg.stall_timeout + 1) * 1000 * 1000);
+    photon::thread_usleep(cfg.stall_timeout + 1000 * 1000);
     EXPECT_EQ(1u, dev->get_client_connections().size());
     EXPECT_EQ(0, cli.xfer(NBD_CMD_FLUSH, 0, nullptr, 0));
 

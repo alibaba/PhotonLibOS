@@ -2350,7 +2350,7 @@ struct VduseDeviceImpl : IBlkDevice {
     // BlkConfig::timeout -> the per-device msg_timeout sysfs (best effort:
     // an old kernel without the attribute keeps its default)
     void apply_msg_timeout() {
-        if (!cfg.timeout)
+        if (cfg.timeout == -1ul)
             return;
         char path[VDUSE_NAME_MAX + 48];
         snprintf(path, sizeof(path), "/sys/class/vduse/%s/msg_timeout", name);
@@ -2361,7 +2361,7 @@ struct VduseDeviceImpl : IBlkDevice {
         }
         DEFER(::close(fd));
         char buf[16];
-        int n = snprintf(buf, sizeof(buf), "%u", cfg.timeout);
+        int n = snprintf(buf, sizeof(buf), "%llu", (unsigned long long)timeout_seconds(cfg.timeout));
         if (::write(fd, buf, n) != n)
             LOG_WARN("vduse failed to set msg_timeout on `, ", name, ERRNO());
     }

@@ -2477,16 +2477,17 @@ struct TcmuDeviceImpl : IBlkDevice {
         }
         snprintf(p, sizeof(p), "%s/attrib/dev_size", bs_path);
         if (cfg_write_u64(p, cfg.info.size) < 0) return -1;
-        if (cfg.timeout) {
+        if (cfg.timeout != -1ul) {
+            uint64_t secs = timeout_seconds(cfg.timeout);
             snprintf(p, sizeof(p), "%s/attrib/cmd_time_out", bs_path);
-            if (cfg_write_u64(p, cfg.timeout) < 0) return -1;
+            if (cfg_write_u64(p, secs) < 0) return -1;
             // qfull_time_out is the restart-window knob: commands queue this long
             // while the daemon is down, covering an orderly restart. It exists only
             // since v4.19 (RHEL/CentOS 7.5+); before that qfull commands queue with
             // no timeout at all, so a missing attrib is weaker protection, not an
             // error.
             snprintf(p, sizeof(p), "%s/attrib/qfull_time_out", bs_path);
-            if (cfg_write_u64(p, cfg.timeout) < 0) {
+            if (cfg_write_u64(p, secs) < 0) {
                 if (errno != ENOENT)
                     return -1;
                 LOG_WARN("no ` (kernel older than v4.19): qfull commands wait without a timeout", p);

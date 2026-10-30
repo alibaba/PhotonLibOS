@@ -255,7 +255,7 @@ TEST(ConsumerIo, a_consumer_that_never_returns_costs_the_caller_a_deadline) {
     auto wbuf = pattern(0x5a, 4096);
     ConsumerIoOpts o;
     o.read_only = true;      // open() on a FIFO with no writer does not return
-    o.timeout_us = 1000 * 1000;
+    o.timeout = 1000 * 1000;
     ConsumerIoResult r = consumer_io(path, wbuf.data(), 4096, OFF, o);
 
     // The caller is back and the consumer is not, which is the reason the
@@ -267,7 +267,7 @@ TEST(ConsumerIo, a_consumer_that_never_returns_costs_the_caller_a_deadline) {
     EXPECT_FALSE(r.reaped);
     EXPECT_EQ(CONS_TIMEOUT, r.stage);
     EXPECT_GT(r.pid, 0);
-    EXPECT_GE(r.elapsed_us, o.timeout_us);
+    EXPECT_GE(r.elapsed_us, o.timeout);
     EXPECT_NE(nullptr, r.shm);
 
     // This one CAN be collected, and that is the difference between it and the

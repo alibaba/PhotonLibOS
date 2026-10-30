@@ -544,7 +544,7 @@ public:
         TcmuHBA::Config cfg(make_info());
         cfg.loopback_lun = loopback;
         cfg.loopback_wwn = TEST_WWN;
-        cfg.timeout = 30;
+        cfg.timeout = 30ull * 1000 * 1000;
         return cfg;
     }
 
@@ -1849,7 +1849,7 @@ TEST_F(TcmuTest, unmap_zeroes_when_the_backend_cannot_trim) {
 TEST_F(TcmuTest, timeout_knobs) {
     if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/false);
-    cfg.timeout = 45;
+    cfg.timeout = 45ull * 1000 * 1000;
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -2879,7 +2879,7 @@ TEST_F(TcmuTest, an_ordinary_write_is_durable_when_flush_is_not_configured) {
     TcmuHBA::Config cfg(no_flush);
     cfg.loopback_lun = true;
     cfg.loopback_wwn = TEST_WWN;
-    cfg.timeout = 30;
+    cfg.timeout = 30ull * 1000 * 1000;
     test::BackendProbe probe(file);   // does not own `file`
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -2968,7 +2968,7 @@ TEST_F(TcmuTest, zeroing_completions_are_durable_when_flush_is_not_configured) {
     TcmuHBA::Config cfg(no_flush);
     cfg.loopback_lun = true;
     cfg.loopback_wwn = TEST_WWN;
-    cfg.timeout = 30;
+    cfg.timeout = 30ull * 1000 * 1000;
     NoTrimFile backend(file);   // trim/zero_range unsupported, so zeroing is zero_fill's writes
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -3125,7 +3125,7 @@ TEST_F(TcmuTest, a_failed_sync_after_a_zeroing_completion_reaches_the_initiator)
     TcmuHBA::Config cfg(no_flush);
     cfg.loopback_lun = true;
     cfg.loopback_wwn = TEST_WWN;
-    cfg.timeout = 30;
+    cfg.timeout = 30ull * 1000 * 1000;
     NoTrimFile backend(file);
     backend.fail_syncs = true;   // every fdatasync answers -1/EIO
     auto dev = sys->new_device(cfg);
@@ -3192,7 +3192,7 @@ TEST_F(TcmuTest, mode_sense_reports_its_real_caching_page_length_and_no_write_ca
     TcmuHBA::Config cfg(no_flush);
     cfg.loopback_lun = true;
     cfg.loopback_wwn = TEST_WWN;
-    cfg.timeout = 30;
+    cfg.timeout = 30ull * 1000 * 1000;
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -3589,7 +3589,7 @@ TEST_F(TcmuTest, shutdown_keeps_the_claim_when_backstore_removal_fails) {
     TcmuHBA::Config cfg(make_info());
     cfg.loopback_lun = false;   // so shutdown() cannot detach the LUN this case attaches
     cfg.loopback_wwn = TEST_WWN;
-    cfg.timeout = 30;
+    cfg.timeout = 30ull * 1000 * 1000;
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -3723,7 +3723,7 @@ static constexpr uint64_t CRASH_WAIT_US = 240ull * 1000000;
 // tcmu_handle_completion() treats an expired one as reclaim-and-free rather than as a
 // broken ring. Freeing the data area waits for the tail to reach the entry, which is
 // why an expired entry A still carries the payload its successor is about to write.
-static constexpr uint64_t CRASH_CMD_TIMEOUT = 5;
+static constexpr uint64_t CRASH_CMD_TIMEOUT = 5ull * 1000 * 1000;   // us
 // How long the child waits between the short write returning from the backend and
 // _exit(). handle_cmd writes the response and the mark immediately after emul_write
 // returns -- no blocking step in between -- so this is margin, not a race being

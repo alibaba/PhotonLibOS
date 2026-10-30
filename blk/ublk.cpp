@@ -348,6 +348,8 @@ struct UblkCtrl {
     photon::thread* pump_th = nullptr;
     int fd = -1;
     bool stopping = false;
+    // per-command deadline, from BlkConfig::mgmt_timeout; -1ul = no deadline
+    uint64_t cmd_timeout = 5ull * 1000 * 1000;
 
     ~UblkCtrl() { fini(); }
 
@@ -397,7 +399,15 @@ struct UblkCtrl {
         if (fd >= 0) { ::close(fd); fd = -1; }
     }
 
-    // one control command round-trip; 0 on success, -1 with errno set
+    // one control command round-trip; 0 on success, -1 with errno set.
+    // Every command carries a deadline: a control ioctl that waits inside the kernel
+    // (STOP_DEV and DEL_DEV wait for the node's openers, END_USER_RECOVERY waits for
+    // the queue's fetches) must not become an infinite wait in this process. Where the
+    // kernel honours the linked timeout the call answers ETIMEDOUT; where it does not,
+    // the engine keeps waiting for the CQE rather than abandoning a command the kernel
+    // still owns -- a deadline that cannot be met is still a bound we can name, and the
+    // capability gates in blk.h are what keep us out of the commands that cannot be
+    // cut short at all.
     int transact(uint32_t dev_id, uint32_t cmd_op, void* buf, uint16_t len, uint64_t data0) {
         ublksrv_ctrl_cmd c;
         memset(&c, 0, sizeof(c));
@@ -406,7 +416,8 @@ struct UblkCtrl {
         c.len = len;
         c.addr = (uint64_t)(uintptr_t)buf;
         c.data[0] = data0;
-        if (iouring_uring_cmd(fd, cmd_op, &c, sizeof(c), Timeout(), ce) < 0)
+        if (iouring_uring_cmd(fd, cmd_op, &c, sizeof(c),
+                              cmd_timeout == -1ul ? Timeout() : Timeout(cmd_timeout), ce) < 0)
             return -1;   // errno = -res, set by iouring_uring_cmd
         return 0;
     }
@@ -631,7 +642,7 @@ struct UblkDeviceImpl : IBlkDevice {
         // than waits, so what is left is the QUIESCED poll -- a bounded wait on the
         // kernel. shutdown() REFUSES rather than forcing: it gates on TRY_STOP_DEV,
         // which answers EBUSY for as long as an initiator holds the node, and after
-        // stop_timeout_ms of that it returns EBUSY with nothing torn down and the node
+        // mgmt_timeout of that it returns EBUSY with nothing torn down and the node
         // still there. Measured on 7.0.0-34-generic -- 201 EBUSY answers over 2.19 s at
         // the default 2000 ms, on a LIVE and on a QUIESCED device alike. The path with no
         // liveness check to consult is destroy_orphan(), whose DEL_DEV is a different
@@ -985,7 +996,10 @@ struct UblkDeviceImpl : IBlkDevice {
             photon::thread_enable_join(th);
             q->tag_ths.push_back(th);
         }
-        q->fetches_issued.wait(queue_depth);   // all initial fetches in flight (see tag_loop)
+        Timeout fetch_tmo = cfg.mgmt_timeout == -1ul ? Timeout() : Timeout(cfg.mgmt_timeout);
+        if (q->fetches_issued.wait(queue_depth, fetch_tmo) < 0)
+            LOG_ERROR_RETURN(ETIMEDOUT, -1, "ublk: queue ` issued ` of ` initial fetches before the control deadline",
+                             q->qid, (int64_t)q->fetches_issued.count(), (int64_t)queue_depth);
         return 0;
     }
 
@@ -1410,13 +1424,17 @@ struct UblkDeviceImpl : IBlkDevice {
         if (validate_params() < 0)
             return -1;
         // the old daemon's quiesce work runs async after its fds close
-        int64_t deadline = cfg.quiesce_timeout_ms;
+        // uint64_t throughout: -1ul is UINT64_MAX, i.e. "no deadline", not a deadline
+        // that wraps around
+        uint64_t deadline = cfg.mgmt_timeout;
         while (ctrl.start_recovery((uint32_t)dev_id) < 0) {
             if (errno != EBUSY)
                 LOG_ERRNO_RETURN(0, -1, "ublk START_USER_RECOVERY failed, dev ` state ` flags `",
                                  dev_id, (int)info.state, info.flags);
-            if ((deadline -= 1) <= 0)
+            if (deadline != -1ul && deadline <= 1000)
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "ublk device ` never quiesced", dev_id);
+            if (deadline != -1ul)
+                deadline -= 1000;
             photon::thread_usleep(1000);
         }
         if (open_cdev() < 0)
@@ -1488,6 +1506,7 @@ struct UblkDeviceImpl : IBlkDevice {
 
         if (ctrl.init() < 0)
             return -1;
+        ctrl.cmd_timeout = cfg.mgmt_timeout;
 
         bool recover = false;
         if (want != UINT32_MAX) {
@@ -1500,10 +1519,12 @@ struct UblkDeviceImpl : IBlkDevice {
                 // detach is transient. We hold the flock, so no live photon
                 // daemon exists; a device that stays LIVE past the deadline
                 // belongs to a foreign daemon.
-                int64_t deadline = cfg.quiesce_timeout_ms;
+                uint64_t deadline = cfg.mgmt_timeout;
                 while (info.state == UBLK_S_DEV_LIVE) {
-                    if ((deadline -= 1) <= 0)
+                    if (deadline != -1ul && deadline <= 1000)
                         LOG_ERROR_RETURN(EBUSY, -1, "ublk device ` has a live daemon", want);
+                    if (deadline != -1ul)
+                        deadline -= 1000;
                     photon::thread_usleep(1000);
                     if (ctrl.get_info(want, &info) < 0)
                         LOG_ERROR_RETURN(0, -1, "ublk GET_DEV_INFO failed, dev `", want);
@@ -1556,19 +1577,19 @@ struct UblkDeviceImpl : IBlkDevice {
         // sees the final QUIESCED state instead of racing the transition
         ublksrv_ctrl_dev_info info;
         bool quiesced = false;
-        for (uint32_t waited = 0; ; waited++) {
+        for (uint64_t waited = 0; ; waited += 1000) {
             if (ctrl.get_info((uint32_t)dev_id, &info) == 0 &&
                 (info.state == UBLK_S_DEV_QUIESCED || info.state == UBLK_S_DEV_FAIL_IO)) {
                 quiesced = true;
                 break;
             }
-            if (waited >= cfg.quiesce_timeout_ms)
+            if (cfg.mgmt_timeout != -1ul && waited >= cfg.mgmt_timeout)
                 break;
             photon::thread_usleep(1000);
         }
         if (!quiesced)
-            LOG_WARN("ublk device ` did not quiesce within ` ms", dev_id,
-                     cfg.quiesce_timeout_ms);
+            LOG_WARN("ublk device ` did not quiesce within ` us", dev_id,
+                     cfg.mgmt_timeout);
         LOG_INFO("ublk device detached, ", VALUE(dev_id), "flush=", (int)wait_pending);
         return 0;
     }
@@ -1622,8 +1643,10 @@ struct UblkDeviceImpl : IBlkDevice {
             // scan, udev's probe) hold the disk briefly right after start --
             // ride them out with a bounded retry; a real holder (mounted fs,
             // open fd) never releases, so EBUSY after the deadline is genuine.
-            uint32_t max_retry = cfg.stop_timeout_ms / 10;   // 10ms granularity
-            for (uint32_t i = 0; ; i++) {
+            uint64_t max_retry = cfg.mgmt_timeout == -1ul
+                                     ? UINT64_MAX
+                                     : cfg.mgmt_timeout / 10000;   // 10ms retries
+            for (uint64_t i = 0; ; i++) {
                 if (ctrl.try_stop_dev((uint32_t)dev_id) == 0)
                     break;
                 int e = errno;   // captured once: every branch below calls something

@@ -1074,7 +1074,7 @@ static bool sysfs_serial(const std::string& kname, std::string* out) {
 // attribute is missing or unreadable, which the one caller treats as a failed case
 // rather than substituting a constant -- a bound that was never measured cannot
 // witness anything.
-static uint64_t msg_timeout_us(const char* name) {
+static uint64_t msg_timeout(const char* name) {
     char path[256];
     snprintf(path, sizeof(path), "/sys/class/vduse/%s/msg_timeout", name);
     FILE* f = ::fopen(path, "r");
@@ -3148,7 +3148,7 @@ TEST_F(VduseTest, multiqueue_shutdown_hands_over_inflight_io_promptly) {
     // device under test is actually running with, not a constant copied from the
     // default. A kernel without the attribute fails the case instead of substituting
     // one, because a bound nobody measured cannot witness a stall.
-    uint64_t bound_us = msg_timeout_us(TEST_NAME);
+    uint64_t bound_us = msg_timeout(TEST_NAME);
     ASSERT_NE(0u, bound_us);
     DEFER(vdpa_detach(TEST_NAME));   // registered BEFORE the attach: vdpa_attach's
                                      // timeout branch returns "" with the consumer

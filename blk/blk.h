@@ -298,6 +298,18 @@ public:
     // gtest string comparison is undefined behaviour, not a clean failure.
     // The name is stable for the serving session, but a freshly appeared node can
     // still reject open() with ENXIO for a moment -- retry the open, not this.
+    //
+    // NEVER open it with O_EXCL, and never treat such an open as a liveness probe.
+    // An exclusive open claims the device in the block layer first (bd_claiming) and
+    // only releases the claim after blkdev_get_whole's partition scan has returned;
+    // a task that dies -- or is killed -- between the two leaves the claim set with no
+    // owner, and every later O_EXCL open of that device then waits in
+    // bd_prepare_to_claim uninterruptibly, forever. The block device keeps a reference
+    // from that waiter, so DEL_DEV cannot finish either: the device is dead until the
+    // machine reboots. Nothing in this library does this any more (a "is anyone holding
+    // the node" probe used to, and cost a VM), and no transport's stop path needs it:
+    // ublk asks the driver with TRY_STOP_DEV, and where the driver has no such command
+    // the answer is info().shutdown_refusal == WaitsForAttached, not a probe.
     virtual const char* get_device_node() = 0;
 
     // Stop serving but keep the kernel-side registration, so that a later
@@ -313,8 +325,8 @@ public:
     //   This wait has NO deadline, deliberately. What it waits on is the peer's
     //   IO arrival rate, which is not ours to bound: a busy guest, initiator or
     //   client keeps refilling, so detach(true) returns when the peer goes
-    //   quiet, not when a timer expires. Contrast ublk's quiesce_timeout_ms and
-    //   stop_timeout_ms, which bound waits on the KERNEL and so can have a
+    //   quiet, not when a timer expires. Contrast ublk's mgmt_timeout, which
+    //   bounds waits on the KERNEL and so can have a
     //   deadline.
     // wait_pending=false: stop consuming the backlog and leave it for the next
     //   start(). This is NOT a promise to return immediately, and reading it as an
@@ -369,6 +381,13 @@ public:
     // handshake.
     UNIMPLEMENTED(int resize(uint64_t new_size));
 };
+
+// Seconds for the kernel attributes that still count in seconds -- tcmu's
+// cmd_time_out/qfull_time_out, vduse's msg_timeout, nbd's NBD_SET_TIMEOUT and
+// NBD_ATTR_TIMEOUT. Rounded UP, so a configured sub-second value cannot silently
+// become the kernel's 0, which means "no timeout". Callers skip the attribute
+// entirely when the configured value is -1 (unlimited); -1 never reaches here.
+inline uint64_t timeout_seconds(uint64_t us) { return (us + 999999) / 1000000; }
 
 struct BlkConfig {
     BlkDevInfo info;
@@ -481,11 +500,31 @@ struct BlkConfig {
                                   // caller-tuned poll, and nbd serves one coroutine per
                                   // connection; none of the three reads this field
 
-    uint32_t timeout = 30;        // seconds; kernel-side tolerance for daemon unavailability;
-                                  // must cover the restart window. Maps to tcmu cmd_time_out +
-                                  // qfull_time_out, vduse msg_timeout, and the nbd kernel
-                                  // device timeout in loopback mode (NBD_SET_TIMEOUT);
-                                  // ublk/vhost-user have no such timer and ignore it
+    // Every timeout in blk/ is a uint64_t in MICROSECONDS, and the name carries no
+    // unit suffix: the type and this paragraph are the one place the unit is stated.
+    // -1ul is UINT64_MAX and means "no deadline", so a limit never has to special-case
+    // zero -- 0 is a real zero-length deadline. The kernel boundaries that take
+    // seconds -- tcmu's cmd_time_out/qfull_time_out, vduse's msg_timeout, nbd's
+    // NBD_SET_TIMEOUT/NBD_ATTR_TIMEOUT -- round up at the conversion, so a sub-second
+    // value cannot silently become the kernel's 0, i.e. "no timeout".
+    uint64_t timeout = 30ull * 1000 * 1000; // kernel-side tolerance for daemon
+                                  // unavailability; must cover the restart window. Maps to
+                                  // tcmu cmd_time_out + qfull_time_out, vduse msg_timeout,
+                                  // and the nbd kernel device timeout in loopback mode
+                                  // (NBD_SET_TIMEOUT); ublk/vhost-user have no such timer and
+                                  // ignore it. -1 = leave the kernel's own timeout alone
+
+    // ONE budget for every MANAGEMENT operation -- no per-operation knobs. It bounds
+    // each control-command round-trip (ublk's ADD_DEV / SET_PARAMS / START_DEV /
+    // START|END_USER_RECOVERY / GET_* / UPDATE_SIZE / STOP_DEV / DEL_DEV), each poll
+    // that waits for a kernel-side state change (the quiesce after detach(), the
+    // LIVE-daemon probe and the START_USER_RECOVERY retry in start()), the TRY_STOP
+    // retry window against transient openers, and the token that waits for a queue's
+    // initial fetches. One deadline because these are the same question -- "how long
+    // may a lifecycle call wait on the kernel" -- and splitting it let a caller set
+    // three numbers that only made sense together. -1ul = no deadline; 0 = refuse to
+    // wait at all.
+    uint64_t mgmt_timeout = 5ull * 1000 * 1000;
 
     bool read_only = false;       // export a read-only device; the write path fails:
                                   // tcmu SCSI WP (handler-level) / ublk UBLK_ATTR_READ_ONLY /
@@ -831,15 +870,6 @@ public:
                                       // UINT32_MAX = kernel auto-assign; otherwise requests
                                       // /dev/ublkb<N> (0 is a valid requestable id)
 
-        uint32_t quiesce_timeout_ms = 3000; // bounded wait for the kernel's ASYNC quiesce
-                                            // transition: detach() before returning, the
-                                            // START_USER_RECOVERY EBUSY poll and the LIVE-daemon
-                                            // probe in start(); 0 = do not wait
-
-        uint32_t stop_timeout_ms = 2000;    // shutdown(): how long to retry TRY_STOP_DEV against
-                                            // transient openers (partition scan, udev probes)
-                                            // before reporting genuine EBUSY; 10ms granularity
-
         uint64_t flags = 0;           // raw UBLK_F_* bits (see linux/ublk_cmd.h);
                                       // UBLK_F_USER_RECOVERY | UBLK_F_USER_RECOVERY_REISSUE
                                       // recommended for daemon-restart resilience;
@@ -919,7 +949,7 @@ public:
     // before calling: nothing in this signature bounds it, and a timeout knob would
     // not either, because there is nothing to retry -- the call is already inside the
     // kernel rather than waiting to be issued. The bounded loop shutdown() drives with
-    // stop_timeout_ms sits around TRY_STOP_DEV, which is the step that answers EBUSY,
+    // mgmt_timeout sits around TRY_STOP_DEV, which is the step that answers EBUSY,
     // and this call has no reason to stop a device it is about to delete.
     //
     // No such device and no tombstone either is ENOENT. A tombstone with no
@@ -1166,7 +1196,7 @@ struct NbdConfig : BlkConfig {
                                     // again; one left behind by a crash is the caller's to
                                     // remove. Same rule as VhostUserController::SockRole.
 
-    uint32_t stall_timeout = 30;    // seconds; how long an INCOMPLETE message may stall
+    uint64_t stall_timeout = 30ull * 1000 * 1000; // how long an INCOMPLETE message may stall
                                     // before its connection is dropped. Two reads are
                                     // bounded by it: the handshake, which holds a
                                     // connection slot and that connection's coroutine
@@ -1180,7 +1210,7 @@ struct NbdConfig : BlkConfig {
                                     // kernel's request timeout for the loopback device
                                     // and releases nothing on this side of the socket.
                                     // Idle time BETWEEN requests is not a stall and is
-                                    // not bounded. 0 = no deadline.
+                                    // not bounded. -1 = no deadline.
 
     NbdConfig() = default;
     explicit NbdConfig(const BlkDevInfo& i) : BlkConfig(i) {}

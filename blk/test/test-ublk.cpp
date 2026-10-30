@@ -563,7 +563,7 @@ TEST_F(UblkConfigTest, capabilities_descriptor) {
     EXPECT_EQ(BlkBacklog::KernelSide, i.backlog);
     EXPECT_EQ(BlkAdoption::Full, i.adoption);
     // shutdown() gates on TRY_STOP_DEV, which answers EBUSY for as long as an initiator
-    // holds the node and then gives up with EBUSY after stop_timeout_ms, leaving the
+    // holds the node and then gives up with EBUSY after mgmt_timeout, leaving the
     // device alone -- shutdown_busy is the case that pins it. That DEL_DEV itself has no
     // liveness check is destroy_orphan()'s contract, a different operation, and citing
     // it here is what had this axis answering one level below the question blk.h asks.
@@ -575,7 +575,7 @@ TEST_F(UblkConfigTest, capabilities_descriptor) {
     EXPECT_EQ(BlkResizeEffect::NotifiedOrFailed, i.resize_effect);
     // The one transport where detach(false) really does skip the I/O wait: stop_serving
     // drains in_flight only when asked to flush, and queue teardown abandons rather than
-    // waits. What is left is the QUIESCED poll, bounded by quiesce_timeout_ms because it
+    // waits. What is left is the QUIESCED poll, bounded by mgmt_timeout because it
     // waits on the kernel and not on a backend. Every other transport answers false.
     EXPECT_EQ(true, i.detach_no_wait);
     EXPECT_EQ(FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES, i.offered);
@@ -1859,7 +1859,7 @@ TEST_F(UblkTest, consumer_hang_is_contained) {
     // and shutdown() bounds its wait for the node's last opener with this knob.
     // The default is a 2 s budget in total, tuned for a holder that will never
     // leave; here one is expected to, and 2 s is not much against a re-attach.
-    cfg.stop_timeout_ms = 20000;
+    cfg.mgmt_timeout = 20ull * 1000 * 1000;
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -1870,6 +1870,15 @@ TEST_F(UblkTest, consumer_hang_is_contained) {
     DEFER(rec.release_gate(1));
     rec.gated = true;
     ASSERT_EQ(0, dev->start(&rec));
+
+    // (c) requires the teardown to let the wedged consumer's IO finish while the
+    // consumer still holds the node. That is a TRY_STOP-shaped stop: on a kernel
+    // without it, STOP_DEV goes through ublk_stop_dev's no-server path, which
+    // force-aborts outstanding requests, so the consumer's fsync answers EIO and
+    // "the IO it was doing comes back successful" is not something this kernel can
+    // deliver (measured on a 6.6-capability surface: fsync EIO, consumer exit 5).
+    if (dev->get_info().shutdown_refusal != BlkShutdownRefusal::RefusesWhenAttached)
+        return report_skip("no TRY_STOP_DEV: the stop force-aborts the wedged consumer's IO, so (c) cannot hold");
 
     std::string node = node_of(dev);
     ASSERT_FALSE(node.empty());
@@ -1910,7 +1919,7 @@ TEST_F(UblkTest, consumer_hang_is_contained) {
     static constexpr uint64_t BUDGET_US = 3ull * 1000 * 1000;
     auto wbuf = pattern(0x5a);
     test::DeviceIoOpts o;
-    o.timeout_us = BUDGET_US;
+    o.timeout = BUDGET_US;
     test::ConsumerIoResult rep;
     o.report = &rep;
     int rc = test::device_io(node, wbuf.data(), wbuf.size(), IO_OFF, o);
@@ -1989,7 +1998,7 @@ TEST_F(UblkTest, writer_hang_is_contained) {
     UblkController::Config cfg(make_info());
     // As above: shutdown() bounds its wait for the node's last opener with this
     // knob, and here one is expected to leave -- as soon as the gate opens.
-    cfg.stop_timeout_ms = 20000;
+    cfg.mgmt_timeout = 20ull * 1000 * 1000;
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     test::ConsumerIoResult abandoned;
@@ -2788,38 +2797,46 @@ TEST_F(UblkTest, custom_lock_dir) {
 
 TEST_F(UblkTest, timeout_knobs) {
     if (skip_reason) return;
-    // stop_timeout_ms bounds shutdown()'s TRY_STOP retry window against a
+    // mgmt_timeout bounds shutdown()'s TRY_STOP retry window against a
     // persistent holder
     UblkController::Config cfg(make_info());
-    cfg.stop_timeout_ms = 100;
+    cfg.mgmt_timeout = 100ull * 1000;
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
     ASSERT_EQ(0, dev->start(file));
     std::string node = node_of(dev);
 
-    int fd = -1;
-    test::run_off_vcpu([&] { fd = ::open(node.c_str(), O_RDONLY); });
-    ASSERT_GE(fd, 0);
+    // The retry half below is only expressible where the kernel can ANSWER "is it
+    // held": without TRY_STOP_DEV the stop waits for the opener inside STOP_DEV, and
+    // this case is the opener -- the deadlock CI sat in for the whole ctest timeout
+    // (reproduced on a 6.6-capability VM). The quiesce half does not depend on it.
+    if (dev->get_info().shutdown_refusal == BlkShutdownRefusal::RefusesWhenAttached) {
+        int fd = -1;
+        test::run_off_vcpu([&] { fd = ::open(node.c_str(), O_RDONLY); });
+        ASSERT_GE(fd, 0);
 
-    auto t0 = std::chrono::steady_clock::now();
-    errno = 0;
-    EXPECT_EQ(-1, dev->shutdown());
-    EXPECT_EQ(EBUSY, errno);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::steady_clock::now() - t0).count();
-    EXPECT_GE(ms, 50);      // it retried, not failed on the first EBUSY
-    EXPECT_LT(ms, 1500);    // the 100ms knob, not the 2s default
+        auto t0 = std::chrono::steady_clock::now();
+        errno = 0;
+        EXPECT_EQ(-1, dev->shutdown());
+        EXPECT_EQ(EBUSY, errno);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - t0).count();
+        EXPECT_GE(ms, 50);      // it retried, not failed on the first EBUSY
+        EXPECT_LT(ms, 1500);    // the 100ms knob, not the 2s default
 
-    ::close(fd);
-    ASSERT_EQ(0, dev->shutdown());
+        ::close(fd);
+        ASSERT_EQ(0, dev->shutdown());
+    } else {
+        report_skip("no TRY_STOP_DEV on this kernel: the mgmt_timeout half cannot be exercised; the quiesce half still runs");
+    }
 
-    // quiesce_timeout_ms = 0: detach() declines to wait out the kernel's
-    // async quiesce, yet the device still quiesces on its own -- verify it
-    // turns into a listed orphan shortly after (the test supplies the
-    // patience detach declined to), then recover and remove it
+    // detach() keeps the registration and the kernel quiesces asynchronously; the
+    // device then turns into a listed orphan, which is what a recovery loop adopts.
+    // (This half used to zero the quiesce budget so detach() would decline the wait.
+    // That knob is folded into mgmt_timeout, where 0 means "refuse to wait at all"
+    // -- a value no start() could survive -- so the default budget is used here.)
     UblkController::Config cfg2(make_info());
-    cfg2.quiesce_timeout_ms = 0;
     auto dev2 = ctl->new_device(cfg2);
     ASSERT_NE(nullptr, dev2);
     DEFER(delete dev2);

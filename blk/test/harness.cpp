@@ -1176,9 +1176,9 @@ void consumer_decode(ConsumerIoResult& r, const ConsumerReport* rep, int st,
 // caller -- the thing the isolation exists to protect -- stays stuck.
 // Returns 1 if the child exited (`*st` holds its status), 0 if the deadline
 // passed with it still running, -1 if it is gone without a status to read.
-int consumer_wait(pid_t pid, uint64_t timeout_us, int* st, uint64_t* elapsed_us,
+int consumer_wait(pid_t pid, uint64_t timeout, int* st, uint64_t* elapsed_us,
                   uint64_t poll_ns) {
-    uint64_t t0 = stress_now_us(), deadline = t0 + timeout_us;
+    uint64_t t0 = stress_now_us(), deadline = t0 + timeout;
     int ret = 0;
     *st = 0;
     for (;;) {
@@ -1219,10 +1219,10 @@ struct ConsumerSpawn {
     const void* wbuf = nullptr;        // copied into the channel before the spawn
     size_t len = 0;                    // the write payload's; 0 copies none
     ConsumerStressReport* stress = nullptr;   // filled from the channel if reaped
-    uint64_t timeout_us = 0;           // 0 = CONSUMER_TIMEOUT_US
+    uint64_t timeout = 0;           // 0 = CONSUMER_TIMEOUT_US
     // Cleared by the one mode whose child does not end on its own: the spawn then
     // hands the pid and the channel back without waiting, and the caller's own
-    // bounded stop is what collects it. `timeout_us` is not read in that case.
+    // bounded stop is what collects it. `timeout` is not read in that case.
     bool wait = true;
     // A report POD that has to be constructed rather than merely cleared, which is
     // what one with std::atomic members is. Runs after the zeroing below and before
@@ -1233,7 +1233,7 @@ struct ConsumerSpawn {
 ConsumerIoResult consumer_spawn(const ConsumerSpawn& s) {
     ConsumerIoResult r;
     r.node = s.node;
-    uint64_t timeout = s.timeout_us ? s.timeout_us : CONSUMER_TIMEOUT_US;
+    uint64_t timeout = s.timeout ? s.timeout : CONSUMER_TIMEOUT_US;
     size_t size = s.layout.total;
 
     int cfd = channel_create(size);
@@ -1422,7 +1422,7 @@ StressResult stress_in_child(const StressCfg& c, uint64_t span,
               a_direct, a_flush, a_seed, c.node.c_str()};
     s.layout = channel_layout(CONS_MODE_STRESS, 0);
     s.stress = &srep;
-    s.timeout_us = CONSUMER_STRESS_TIMEOUT_US;
+    s.timeout = CONSUMER_STRESS_TIMEOUT_US;
     ConsumerIoResult r = consumer_spawn(s);
     res.child_pid = r.pid;
     // Not a copy of a census this parent may not have: r.fds is
@@ -1600,11 +1600,11 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf,
     s.layout = channel_layout(CONS_MODE_IO, len);
     s.wbuf = wbuf;
     s.len = len;
-    s.timeout_us = o.timeout_us;
+    s.timeout = o.timeout;
     return consumer_spawn(s);
 }
 
-ConsumerIoResult consumer_spawn_argv(const std::vector<std::string>& argv, uint64_t timeout_us) {
+ConsumerIoResult consumer_spawn_argv(const std::vector<std::string>& argv, uint64_t timeout) {
     ConsumerIoResult refused;
     // Name the node, not the sentinel: the path is argv's last element by
     // contract, and the refusal below prints the offending first element itself.
@@ -1624,7 +1624,7 @@ ConsumerIoResult consumer_spawn_argv(const std::vector<std::string>& argv, uint6
     // malformed on purpose -- so there is no length here that could be right.
     s.layout = channel_layout(CONS_MODE_IO, 0);
     s.node = refused.node;
-    s.timeout_us = timeout_us;
+    s.timeout = timeout;
     for (const auto& a : argv)
         s.argv.push_back(a.c_str());
     return consumer_spawn(s);
@@ -1635,7 +1635,7 @@ void consumer_set_suite_body(ConsumerSuiteBody body) {
 }
 
 ConsumerIoResult consumer_spawn_suite(const std::vector<std::string>& args,
-                                      const std::string& node, uint64_t timeout_us) {
+                                      const std::string& node, uint64_t timeout) {
     ConsumerIoResult refused;
     refused.node = node;
     // Refused in the parent rather than sent: a child that finds no body exits with a
@@ -1662,11 +1662,11 @@ ConsumerIoResult consumer_spawn_suite(const std::vector<std::string>& args,
     // no payload for it -- and the child derives the same layout from the same (tag, 0),
     // which is what keeps the two sides reading one another's page at one offset.
     s.layout = channel_layout(CONS_MODE_SUITE, 0);
-    s.timeout_us = timeout_us;
+    s.timeout = timeout;
     return consumer_spawn(s);
 }
 
-bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us) {
+bool consumer_reap(ConsumerIoResult& r, uint64_t timeout) {
     if (r.reaped)
         return true;
     if (r.pid <= 0)
@@ -1679,7 +1679,7 @@ bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us) {
     uint64_t elapsed = 0;
     // off the vcpu: it is the same bounded WNOHANG/nanosleep poll
     run_off_vcpu([&] {
-        w = consumer_wait(r.pid, timeout_us ? timeout_us : CONSUMER_TIMEOUT_US,
+        w = consumer_wait(r.pid, timeout ? timeout : CONSUMER_TIMEOUT_US,
                           &st, &elapsed, 10 * 1000 * 1000);
     });
     r.elapsed_us += elapsed;
@@ -1725,7 +1725,7 @@ int device_io(const std::string& node, const void* wbuf, size_t len,
         ConsumerIoOpts c;
         c.read_only = o.read_only;
         c.direct = o.direct;
-        c.timeout_us = o.timeout_us;
+        c.timeout = o.timeout;
         r = consumer_io(node, wbuf, len, off, c);
     });
     if (o.report)
@@ -2014,13 +2014,13 @@ int BackgroundWriter::start(const std::string& node, const Opts& o) {
     return 0;
 }
 
-bool BackgroundWriter::stop(ConsumerIoResult* abandoned, uint64_t timeout_us) {
+bool BackgroundWriter::stop(ConsumerIoResult* abandoned, uint64_t timeout) {
     if (!running)
         return true;   // a writer already stopped was not abandoned by this call
     running = false;
     ConsumerWriterReport* wr = w;
     w = nullptr;   // the channel is about to go; nothing may read through it after
-    uint64_t timeout = timeout_us ? timeout_us : CONSUMER_TIMEOUT_US;
+    uint64_t budget = timeout ? timeout : CONSUMER_TIMEOUT_US;
     wr->stop_flag.store(1, std::memory_order_relaxed);
     // Off the vcpu and bounded. The writer leaves its loop only once the IO it is
     // inside has returned, and that IO is served by this very process -- so a wait
@@ -2035,7 +2035,7 @@ bool BackgroundWriter::stop(ConsumerIoResult* abandoned, uint64_t timeout_us) {
     int st = 0, ww = 0;
     uint64_t elapsed = 0;
     run_off_vcpu([&] {
-        ww = consumer_wait(r.pid, timeout, &st, &elapsed, 10 * 1000 * 1000);
+        ww = consumer_wait(r.pid, budget, &st, &elapsed, 10 * 1000 * 1000);
     });
     r.elapsed_us += elapsed;
     // The last moment these can be read, and both are read after stop() returns.
@@ -2048,7 +2048,7 @@ bool BackgroundWriter::stop(ConsumerIoResult* abandoned, uint64_t timeout_us) {
         // Logged here rather than left to the caller: the destructor calls stop()
         // too, and nothing there could report what it got back.
         LOG_ERROR("the background writer on ` did not stop within ` us; abandoning pid ` (an uninterruptible sleeper cannot be killed)",
-                  r.node, timeout, (int64_t)r.pid);
+                  r.node, budget, (int64_t)r.pid);
         if (abandoned) {
             *abandoned = r;
             r.pid = -1;      // ownership moved: nothing here may reap or release it
@@ -2098,8 +2098,8 @@ int BackgroundWriter::errors() const {
     return w ? w->errors.load(std::memory_order_relaxed) : final_errors;
 }
 
-bool BackgroundWriter::wait_iters(uint64_t n, uint64_t timeout_us) {
-    uint64_t deadline = photon::now + timeout_us;
+bool BackgroundWriter::wait_iters(uint64_t n, uint64_t timeout) {
+    uint64_t deadline = photon::now + timeout;
     while (iters() < n) {
         if (photon::now >= deadline)
             return false;

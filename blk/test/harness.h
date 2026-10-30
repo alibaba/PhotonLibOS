@@ -681,7 +681,7 @@ struct ConsumerIoOpts {
     // killed, an uninterruptible sleeper ignores signals -- and the call
     // reports ETIMEDOUT with `hung` set. 0 selects the default below, which is
     // deliberately far above a served IO: that one completes in milliseconds.
-    uint64_t timeout_us = 0;
+    uint64_t timeout = 0;
 };
 constexpr uint64_t CONSUMER_TIMEOUT_US = 60ull * 1000 * 1000;
 
@@ -731,7 +731,7 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, size_t l
 
 // Wait out a child that consumer_io() abandoned, then finish reading its
 // report. Returns true once the child is collected, which sets `reaped`; false
-// if `timeout_us` (0 = CONSUMER_TIMEOUT_US) passed again -- the child is still
+// if `timeout` (0 = CONSUMER_TIMEOUT_US) passed again -- the child is still
 // running and still not killed, an uninterruptible sleeper cannot be, which is
 // why the consumer is a child rather than a thread in the first place -- or if
 // it turned out to be gone without a status to read, which leaves `reaped`
@@ -747,7 +747,7 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, size_t l
 // That refusal is reached the other way round: a caller that gave up on the
 // child, released the channel itself (see consumer_release), and then called
 // this anyway.
-bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us = 0);
+bool consumer_reap(ConsumerIoResult& r, uint64_t timeout = 0);
 
 // Unmap the result channel of a consumer that will not be reaped. Idempotent.
 void consumer_release(ConsumerIoResult& r);
@@ -782,7 +782,7 @@ void consumer_release(ConsumerIoResult& r);
 // libc's exit codes rather than this mapping of them -- and would say nothing
 // about the path the suites actually take.
 ConsumerIoResult consumer_spawn_argv(const std::vector<std::string>& argv,
-                                     uint64_t timeout_us = 0);
+                                     uint64_t timeout = 0);
 
 // ---------------------------------------------------------------------------
 // a suite's own child mode
@@ -848,7 +848,7 @@ void consumer_set_suite_body(ConsumerSuiteBody body);
 // to hand to consumer_reap(): consumer_io()'s contract, unchanged.
 ConsumerIoResult consumer_spawn_suite(const std::vector<std::string>& args,
                                       const std::string& node,
-                                      uint64_t timeout_us = 0);
+                                      uint64_t timeout = 0);
 
 // ---------------------------------------------------------------------------
 // single-shot device IO (the suites' workhorse) and a deterministic pattern
@@ -860,7 +860,7 @@ struct DeviceIoOpts {
     fs::IFile* backend = nullptr;   // also verify the range in the backend file
     bool read_only = false;         // skip the write+fsync, just read the range
     bool direct = false;            // O_DIRECT
-    uint64_t timeout_us = 0;        // 0 = CONSUMER_TIMEOUT_US
+    uint64_t timeout = 0;        // 0 = CONSUMER_TIMEOUT_US
     ConsumerIoResult* report = nullptr;   // optional: what the consumer child did
 };
 
@@ -1080,7 +1080,7 @@ public:
     // keep the handle on it (its pid and its result channel, for a later
     // consumer_reap()); without one the channel is released here and the child is
     // left to finish or not on its own. Idempotent.
-    bool stop(ConsumerIoResult* abandoned = nullptr, uint64_t timeout_us = 0);
+    bool stop(ConsumerIoResult* abandoned = nullptr, uint64_t timeout = 0);
     ~BackgroundWriter() { stop(); }
 
     // The child's own IO failures, plus one from this side if what the child
@@ -1090,7 +1090,7 @@ public:
     int errors() const;
     uint64_t iters() const;
     // wait until at least `n` iterations completed; false on timeout
-    bool wait_iters(uint64_t n, uint64_t timeout_us = 30ull * 1000 * 1000);
+    bool wait_iters(uint64_t n, uint64_t timeout = 30ull * 1000 * 1000);
 
 private:
     ConsumerIoResult r;                 // the child: its pid, and the channel

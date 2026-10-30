@@ -392,7 +392,7 @@ struct NbdDeviceImpl : NbdDevice {
     // notices.
     bool write_through = true;
     uint32_t stack_size = DEFAULT_STACK_SIZE;   // copied from cfg at start()
-    uint64_t stall_us = 0;                      // cfg.stall_timeout in us; 0 = none
+    uint64_t stall_limit = 0;                // cfg.stall_timeout; 0 = none
 
 #ifdef __linux__
     // Loopback-attach state. Attaching an nbd device is Linux-only -- ioctls on
@@ -556,7 +556,7 @@ struct NbdDeviceImpl : NbdDevice {
         if (bytes.count() == 0)
             bytes.signal(MAX_INFLIGHT_BYTES);
         stack_size = cfg.stack_size;
-        stall_us = (uint64_t)cfg.stall_timeout * 1000 * 1000;
+        stall_limit = cfg.stall_timeout == -1ul ? 0 : cfg.stall_timeout;
 
         if (!cfg.unix_path.empty()) {
             // Nothing here removes anything. bind() is atomic and answers
@@ -823,7 +823,7 @@ struct NbdDeviceImpl : NbdDevice {
             bool need_buf = req.type == NBD_CMD_READ || req.type == NBD_CMD_WRITE;
             if (need_buf && req.length > MAX_BLOCK_SIZE) {
                 if (req.type == NBD_CMD_WRITE) {
-                    stall_guard stall(c->s, stall_us, &c->stall_nesting);
+                    stall_guard guard(c->s, stall_limit, &c->stall_nesting);
                     if (!c->s->skip_read(req.length))
                         break;
                 }
@@ -862,7 +862,7 @@ struct NbdDeviceImpl : NbdDevice {
                     bytes.signal(cost);
                     depth.signal(1);
                     if (req.type == NBD_CMD_WRITE) {
-                        stall_guard stall(c->s, stall_us, &c->stall_nesting);
+                        stall_guard guard(c->s, stall_limit, &c->stall_nesting);
                         if (!c->s->skip_read(req.length))
                             break;
                     }
@@ -879,7 +879,7 @@ struct NbdDeviceImpl : NbdDevice {
                     // Dropping the connection is the answer: the client still owes
                     // bytes this request will never receive, so the stream is out
                     // of step from here on whatever we replied.
-                    stall_guard stall(c->s, stall_us, &c->stall_nesting);
+                    stall_guard guard(c->s, stall_limit, &c->stall_nesting);
                     if (c->s->read(buf, req.length) != (ssize_t)req.length) {
                         LOG_WARN("nbd: stall-timeout read failed on connection, dropping");
                         free(buf);
@@ -1138,7 +1138,7 @@ struct NbdDeviceImpl : NbdDevice {
         // reply write. The stall_guard bounds that wait so the tokens are freed
         // within stall_timeout rather than held indefinitely.
         {
-            stall_guard stall(c->s, stall_us, &c->stall_nesting);
+            stall_guard guard(c->s, stall_limit, &c->stall_nesting);
             // write() is the full-count variant, so what comes back is never a partial
             // reply: -1 once that deadline expires or the peer is gone, a short count
             // only at EOF. Either way this answer did not reach the client and never
@@ -1318,7 +1318,7 @@ struct NbdDeviceImpl : NbdDevice {
         // the kernel's request timeout for the loopback device. Restored on the way
         // out, because the transmission phase that follows has to leave an idle
         // client alone: waiting for its next request is the job, not a stall.
-        stall_guard stall(s, stall_us, &c->stall_nesting);
+        stall_guard guard(s, stall_limit, &c->stall_nesting);
         NbdGreeting greeting{NBD_FLAG_FIXED_NEWSTYLE | NBD_FLAG_NO_ZEROES};
         greeting.encode();
         if (s->write(&greeting, sizeof(greeting)) != (ssize_t)sizeof(greeting))
@@ -1686,7 +1686,7 @@ struct NbdDeviceImpl : NbdDevice {
         if (ioctl(nbd_fd, NBD_SET_BLKSIZE, ss) < 0 ||
             ioctl(nbd_fd, NBD_SET_SIZE_BLOCKS, (unsigned long)(cfg.info.size / ss)) < 0 ||
             ioctl(nbd_fd, NBD_SET_FLAGS, (unsigned long)trans_flags) < 0 ||
-            ioctl(nbd_fd, NBD_SET_TIMEOUT, (unsigned long)cfg.timeout) < 0)
+            ioctl(nbd_fd, NBD_SET_TIMEOUT, (unsigned long)timeout_seconds(cfg.timeout)) < 0)
             LOG_ERRNO_RETURN(0, -1, "NBD_SET_* ioctls failed on ", node);
 
         // a brand-new socketpair has exchanged zero bytes, i.e. it is already
@@ -1752,8 +1752,9 @@ struct NbdDeviceImpl : NbdDevice {
         len += nla_append_u64(attrs, len, sizeof(attrs), NBD_ATTR_SIZE_BYTES, cfg.info.size);
         len += nla_append_u64(attrs, len, sizeof(attrs), NBD_ATTR_BLOCK_SIZE_BYTES, ss);
         len += nla_append_u64(attrs, len, sizeof(attrs), NBD_ATTR_SERVER_FLAGS, trans_flags);
-        if (cfg.timeout)
-            len += nla_append_u64(attrs, len, sizeof(attrs), NBD_ATTR_TIMEOUT, cfg.timeout);
+        if (cfg.timeout != -1ul)
+            len += nla_append_u64(attrs, len, sizeof(attrs), NBD_ATTR_TIMEOUT,
+                                  timeout_seconds(cfg.timeout));
         // NBD_ATTR_SOCKETS { NBD_SOCK_ITEM { NBD_SOCK_FD } }; the doit looks
         // the fd up in our fd table and takes its own reference
         char item[32], socks[64];
