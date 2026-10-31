@@ -316,6 +316,10 @@ namespace net {
     extern "C" ISocketServer* new_tcp_socket_server();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);
+    // Wrap an already-connected socket fd into a stream.
+    // The stream takes ownership of the fd: closing or deleting it closes the fd.
+    // The fd will be set non-blocking.
+    extern "C" ISocketStream* new_kernel_socket_stream(int fd);
 
     struct SocketPoolArgs {
         // if not provided, user-defined connector must
