@@ -292,7 +292,7 @@ photon::init(INIT_EVENT_DEFAULT, INIT_IO_LIBCURL);
 - `TLSContext`：证书、密钥、口令、验证模式、ALPN 协议列表。
 - `new_tls_stream(ctx, base, role)`：把 socket 包装为 TLS。
 - `new_tls_client/server(ctx, base)`：工厂包装。
-- `tls_stream_set_hostname()`：发送 SNI，并校验对端证书是否签发给该主机名。
+- `tls_stream_set_hostname()`：DNS 主机名会作为 SNI 发送；IP 字面量不发送 SNI，并按 IP 地址校验对端证书。
 - `tls_stream_set_sni()`：仅发送 SNI，不做名称校验。
 - `tls_stream_get_alpn_selected()`：协商得到的 ALPN 协议。
 
@@ -301,7 +301,7 @@ photon::init(INIT_EVENT_DEFAULT, INIT_IO_LIBCURL);
 需要两项互相独立的检查，缺一不可：
 
 1. `set_verify_mode(VerifyMode::PEER)`（`set_ca_cert()` 与 `set_ca_file()` 会顺带打开 `PEER`）校验证书链是否由受信任的 CA 签发。这只能证明证书本身是真的，不能证明它属于谁。
-2. `tls_stream_set_hostname()` 校验证书确实签发给你要访问的主机。缺少这一步，任何由受信任 CA 签发的证书都会被接受，包括攻击者为自己控制的域名申请的证书。
+2. `tls_stream_set_hostname()` 校验证书确实签发给你要访问的主机。DNS 主机名会作为 SNI 发送；IP 字面量会按地址校验，但不会发送，因为 RFC 6066 不允许在 `HostName` 字段中使用 IP 字面量。缺少名称校验时，任何由受信任 CA 签发的证书都会被接受，包括攻击者为自己控制的域名申请的证书。
 
 `tls_stream_set_hostname()` 必须在首次读写之前调用，因为客户端握手被推迟到那时才进行。主机名与 `dNSName` SAN 匹配，IP 字面量与 `iPAddress` SAN 匹配；证书不含 SAN 时回退到主题的 common name。通配符只匹配最左侧的一级标签，且不允许只覆盖标签的一部分（`www*.example.com` 会被拒绝）。
 

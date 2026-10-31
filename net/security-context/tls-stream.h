@@ -127,11 +127,11 @@ ISocketClient* new_tls_client(TLSContext* ctx, ISocketClient* base,
 /**
  * @brief Set the hostname a client expects to be talking to.
  *
- * Sends `hostname` as SNI, and binds the peer certificate to it, so that a
- * certificate signed by a trusted CA but issued to some *other* name is
- * rejected. Both a chain check and this name check are needed; a chain check
- * alone only proves the certificate is genuine, not that it belongs to the peer
- * you asked for.
+ * Sends DNS hostnames as SNI (IP literals are not sent as SNI), and binds the
+ * peer certificate to the hostname, so that a certificate signed by a trusted
+ * CA but issued to some *other* name is rejected. Both a chain check and this
+ * name check are needed; a chain check alone only proves the certificate is
+ * genuine, not that it belongs to the peer you asked for.
  *
  * Must be called before the first read/write on the stream, as the client
  * handshake is deferred until then.
@@ -139,8 +139,9 @@ ISocketClient* new_tls_client(TLSContext* ctx, ISocketClient* base,
  * The name check is performed by OpenSSL during chain verification, so it
  * requires VerifyMode::PEER. Requesting a hostname on a context left at
  * VerifyMode::NONE is refused with EINVAL rather than silently ignored. IP
- * literals are matched against iPAddress SANs, hostnames against dNSName SANs
- * (falling back to the subject CN when the certificate carries no SAN).
+ * literals are matched against iPAddress SANs without being sent as SNI;
+ * hostnames are sent as SNI and matched against dNSName SANs (falling back to
+ * the subject CN when the certificate carries no SAN).
  * A wildcard matches a single label, in the leftmost position only, and may not
  * cover part of a label (www*.example.com is rejected).
  *
@@ -152,11 +153,12 @@ ISocketClient* new_tls_client(TLSContext* ctx, ISocketClient* base,
 int tls_stream_set_hostname(ISocketStream* stream, const char* hostname);
 
 /**
- * @brief Send `hostname` as SNI, without checking the certificate against it.
+ * @brief Send a DNS hostname as SNI, without checking the certificate against it.
  *
  * The opt-out from tls_stream_set_hostname()'s name check, for callers that
  * verify the peer identity by other means. SNI only tells the server which
- * certificate to send; it places no constraint on the one that comes back.
+ * certificate to send; it places no constraint on the one that comes back. IP
+ * literals are not valid SNI host names and are accepted without an SNI extension.
  *
  * @return 0 on success, -1 on error (errno set)
  */

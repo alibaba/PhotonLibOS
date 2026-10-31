@@ -435,34 +435,66 @@ static int sni_capture_handler(void*, net::ISocketStream* stream) {
     return 0;
 }
 
-TEST(sni, hostname_in_client_hello) {
+static std::string capture_client_hello_sni(const char* hostname) {
     g_captured_client_hello.clear();
     DEFER(photon::wait_all());
     auto srv = net::new_tcp_socket_server();  // plain TCP: just capture raw bytes
+    if (!srv) return {};
     DEFER(delete srv);
-    ASSERT_EQ(0, srv->bind_v4localhost());
-    ASSERT_EQ(0, srv->listen());
+    if (srv->bind_v4localhost() != 0) {
+        ADD_FAILURE() << "failed to bind local SNI test server";
+        return {};
+    }
+    if (srv->listen() != 0) {
+        ADD_FAILURE() << "failed to listen on local SNI test server";
+        return {};
+    }
     srv->set_handler({&sni_capture_handler, nullptr});
-    ASSERT_EQ(0, srv->start_loop(false));
+    if (srv->start_loop(false) != 0) {
+        ADD_FAILURE() << "failed to start local SNI test server";
+        return {};
+    }
     photon::thread_yield();
     auto ep = srv->getsockname();
 
     auto ctx = net::new_tls_context();
+    if (!ctx) return {};
     DEFER(delete ctx);
     auto tcp_cli = net::new_tcp_socket_client();
-    tcp_cli->timeout(1UL * 1000 * 1000);  // 1s, mandatory: bounds the handshake (the plain server never sends a ServerHello)
+    if (!tcp_cli) return {};
+    tcp_cli->timeout(1UL * 1000 * 1000);  // bounds the handshake with a plain TCP peer
     auto cli = net::new_tls_client(ctx, tcp_cli, true);
+    if (!cli) return {};
     DEFER(delete cli);
     auto s = cli->connect(ep);
-    ASSERT_NE(nullptr, s);
+    if (!s) return {};
     DEFER(delete s);
 
-    const char* kHost = "sni-probe.example.test";
-    ASSERT_EQ(0, net::tls_stream_set_sni(s, kHost));
+    EXPECT_EQ(0, net::tls_stream_set_sni(s, hostname));
     char req = 'x';
     s->write(&req, 1);  // drives the client handshake -> sends the ClientHello
     sni_sem.wait(1);
-    EXPECT_NE(std::string::npos, g_captured_client_hello.find(kHost));
+    return g_captured_client_hello;
+}
+
+TEST(sni, hostname_in_client_hello) {
+    const char* kHost = "sni-probe.example.test";
+    auto client_hello = capture_client_hello_sni(kHost);
+    EXPECT_NE(std::string::npos, client_hello.find(kHost));
+}
+
+TEST(sni, ip_literals_omitted_from_client_hello) {
+    auto ipv4_client_hello = capture_client_hello_sni("127.0.0.1");
+    EXPECT_EQ(std::string::npos, ipv4_client_hello.find("127.0.0.1"));
+
+    auto ipv6_client_hello = capture_client_hello_sni("2001:db8::1");
+    EXPECT_EQ(std::string::npos, ipv6_client_hello.find("2001:db8::1"));
+}
+
+TEST(sni, trailing_dot_removed_from_client_hello) {
+    auto client_hello = capture_client_hello_sni("sni-probe.example.test.");
+    EXPECT_NE(std::string::npos, client_hello.find("sni-probe.example.test"));
+    EXPECT_EQ(std::string::npos, client_hello.find("sni-probe.example.test."));
 }
 #endif
 
