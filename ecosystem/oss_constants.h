@@ -27,6 +27,10 @@ static const char OSS_HEADER_KEY_X_OSS_MULTI_RANGE_BEHAVIOR[] = "x-oss-multi-ran
 static const char OSS_HEADER_KEY_X_OSS_FORBID_OVERWRITE[]   = "x-oss-forbid-overwrite";
 static const char OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET[]   = "x-oss-symlink-target";
 static const char OSS_HEADER_KEY_X_OSS_AGENTIC_BUCKET[]   = "x-oss-agentic-bucket";
+static const char OSS_HEADER_KEY_X_OSS_REQUEST_ID[]       = "x-oss-request-id";
+static const char OSS_HEADER_KEY_X_OSS_SERVER_TIME[]      = "x-oss-server-time";
+static const char OSS_HEADER_KEY_X_OSS_QOS_DELAY_TIME[]   = "x-oss-qos-delay-time";
+static const char OSS_HEADER_KEY_RETRY_AFTER[]            = "retry-after";
 
 static const char OSS_PARAM_KEY_CONTINUATION_TOKEN[]        = "continuation-token";
 static const char OSS_PARAM_KEY_OBJECT_META[]     = "objectMeta";

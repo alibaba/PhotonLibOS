@@ -209,7 +209,8 @@ protected:
     }
 
     MarkType this_turn_read(const uint64_t x) const {
-        return (Base::turn(x) << 1) + 2;
+        // The next writer of this slot also wraps with the uint64_t counter.
+        return last_turn_read(x + this->capacity);
     }
 
     MarkType last_turn_read(const uint64_t x) const {
@@ -218,11 +219,32 @@ protected:
 
     explicit LockfreeMPMCRingQueue(size_t c) : Base(c) {}
 
+    struct NativeWait {
+        void operator()(uint64_t) const { ThreadPause::pause(); }
+    };
+
 public:
     using Base::empty;
-    using Base::full;
 
     explicit LockfreeMPMCRingQueue() : Base() {}
+
+    // head counts claims, not completed reads. A claim does not free its slot.
+    bool full() const {
+        auto t = tail.load(std::memory_order_acquire);
+        return slots[idx(t)].mark.load(std::memory_order_acquire) !=
+               last_turn_read(t);
+    }
+
+    // Concurrent snapshot of consecutively reusable slots, O(capacity).
+    size_t write_available() const {
+        auto t = tail.load(std::memory_order_acquire);
+        size_t n = 0;
+        while (n < this->capacity &&
+               slots[idx(t + n)].mark.load(std::memory_order_acquire) ==
+                   last_turn_read(t + n))
+            ++n;
+        return n;
+    }
 
     bool push(const T& x) {
         auto t = tail.load(std::memory_order_acquire);
@@ -238,36 +260,47 @@ public:
                 }
             } else {
                 auto const prevTail = t;
-                auto h = head.load(std::memory_order_acquire);
                 t = tail.load(std::memory_order_acquire);
-                if (t == prevTail && Base::check_full(h, t)) {
-                    return false;
-                }
+                // Let send() apply its backoff while this slot is still held.
+                if (t == prevTail) return false;
             }
         }
     }
 
     bool pop(T& x) {
+        return pop(x, [] {});
+    }
+
+    // Claim only producer-reserved positions. Once claimed, a position cannot
+    // be abandoned; other consumers can claim later positions while we wait.
+    // Inject waiting so raw pop() does not require a coroutine runtime.
+    template <typename OnUnpublishedClaim, typename Wait = NativeWait>
+    bool pop(T& x, OnUnpublishedClaim on_unpublished_claim, Wait wait = {}) {
         auto h = head.load(std::memory_order_acquire);
         for (;;) {
-            auto& ps = slots[idx(h)];
-            auto& slot = ps.data;
-            auto& mark = ps.mark;
-            if (mark.load(std::memory_order_acquire) == this_turn_write(h)) {
-                if (head.compare_exchange_strong(h, h + 1)) {
-                    x = slot;
-                    mark.store(this_turn_read(h), std::memory_order_release);
-                    return true;
-                }
-            } else {
-                auto const prevHead = h;
-                auto t = tail.load(std::memory_order_acquire);
-                h = head.load(std::memory_order_acquire);
-                if (h == prevHead && Base::check_empty(h, t)) {
-                    return false;
-                }
+            auto t = tail.load(std::memory_order_acquire);
+            // Raw recv() can preclaim future positions. The signed difference
+            // also handles counter wraparound.
+            if (static_cast<int64_t>(t - h) <= 0) return false;
+            if (head.compare_exchange_strong(h, h + 1)) break;
+        }
+
+        auto& ps = slots[idx(h)];
+        auto expected = this_turn_write(h);
+        if (ps.mark.load(std::memory_order_acquire) != expected) {
+            // Wake another consumer before waiting for our producer. This
+            // does not release a slot and must not notify blocked senders.
+            on_unpublished_claim();
+            // The last claim makes empty() true, so later publication may not
+            // notify us. Poll the mark instead of using empty-queue parking.
+            for (uint64_t i = 0; ps.mark.load(std::memory_order_acquire) != expected; ++i) {
+                if (i < 64) CPUPause::pause();
+                else wait(i);
             }
         }
+        x = ps.data;
+        ps.mark.store(this_turn_read(h), std::memory_order_release);
+        return true;
     }
 
     template <typename Pause = ThreadPause>
@@ -871,6 +904,34 @@ struct SendBackoff {
     }
 };
 
+namespace detail {
+
+// After the queue's initial CPU pauses, let other coroutines make progress.
+struct ChannelPublicationWait {
+    void operator()(uint64_t i) const {
+        if (i < 128) photon::thread_yield();
+        else photon::thread_usleep(50);
+    }
+};
+
+template <typename...>
+struct make_void {
+    using type = void;
+};
+
+// Only queues with publication hooks receive the Channel's wake/wait policy.
+template <typename Q, typename T, typename = void>
+struct has_publication_hook : std::false_type {};
+
+template <typename Q, typename T>
+struct has_publication_hook<
+    Q, T,
+    typename make_void<decltype(std::declval<Q&>().pop(
+        std::declval<T&>(), std::declval<void (*)()>(), ChannelPublicationWait{}))>::type>
+    : std::true_type {};
+
+}  // namespace detail
+
 template <typename QueueType>
 class RingChannel : public QueueType {
 protected:
@@ -886,6 +947,7 @@ protected:
     uint64_t default_park_usec = 100UL * 1000;
 
     using T = decltype(std::declval<QueueType>().recv());
+    using PublicationHook = detail::has_publication_hook<QueueType, T>;
 
 public:
     using QueueType::empty;
@@ -909,7 +971,7 @@ public:
     }
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
-        if (pop(x)) {
+        if (pop_with_baton(x, PublicationHook{})) {
             after_recv();
             return x;
         }
@@ -917,7 +979,7 @@ public:
         photon::thread_yield();
         Timeout yield_timeout(max_yield_usec);
         uint64_t yield_turn = max_yield_turn;
-        while (!pop(x)) {
+        while (!pop_with_baton(x, PublicationHook{})) {
             if (yield_turn > 0 && !yield_timeout.expired()) {
                 yield_turn--;
                 photon::thread_yield();
@@ -941,6 +1003,11 @@ public:
     uint64_t notification_pending() const { return idlers.inflight(); }
 
 protected:
+    bool pop_with_baton(T& x, std::true_type) {
+        return QueueType::pop(x, [this] { notify_recvers(); }, detail::ChannelPublicationWait{});
+    }
+    bool pop_with_baton(T& x, std::false_type) { return QueueType::pop(x); }
+
     void unpark_if_ready() { if (!empty()) idlers.unpark_one(); }
 
     // Called by a producer right after its push.
@@ -1007,6 +1074,7 @@ class FlexRingChannel {
     uint64_t default_park_usec = 100UL * 1000;   // safety net, see RingChannel
 
     using T = decltype(std::declval<FlexQueueType>().recv());
+    using PublicationHook = detail::has_publication_hook<FlexQueueType, T>;
 
     FlexRingChannel(FlexQueueType* q, uint64_t yield_turn, uint64_t yield_usec)
         : queue(q), default_yield_turn(yield_turn),
@@ -1042,7 +1110,7 @@ public:
 
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
-        if (queue->pop(x)) {
+        if (pop_with_baton(x, PublicationHook{})) {
             after_recv();
             return x;
         }
@@ -1050,7 +1118,7 @@ public:
         photon::thread_yield();
         Timeout yield_timeout(max_yield_usec);
         uint64_t yield_turn = max_yield_turn;
-        while (!queue->pop(x)) {
+        while (!pop_with_baton(x, PublicationHook{})) {
             if (yield_turn > 0 && !yield_timeout.expired()) {
                 yield_turn--;
                 photon::thread_yield();
@@ -1077,6 +1145,11 @@ public:
     uint64_t notification_pending() const { return idlers.inflight(); }
 
 protected:
+    bool pop_with_baton(T& x, std::true_type) {
+        return queue->pop(x, [this] { notify_recvers(); }, detail::ChannelPublicationWait{});
+    }
+    bool pop_with_baton(T& x, std::false_type) { return queue->pop(x); }
+
     void unpark_if_ready() { if (!queue->empty()) idlers.unpark_one(); }
 
     // See RingChannel for why each of the three is needed and sufficient.

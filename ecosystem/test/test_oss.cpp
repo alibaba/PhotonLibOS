@@ -112,6 +112,7 @@ class BasicAuthOssTest : public ::testing::Test {
   void retry_get_and_put();
   void buf_put_and_get();
   void buf_multipart();
+  void request_trace();
 
  private:
   std::string bucket_prefix_;
@@ -1031,6 +1032,67 @@ void BasicAuthOssTest::buf_multipart() {
   }
 }
 
+void BasicAuthOssTest::request_trace() {
+  auto path = get_real_test_path("request_trace/testfile");
+  char buf[4] = {1};
+  iovec iov{buf, sizeof(buf)};
+
+  // success: the last 2xx response is reflected in the trace
+  RequestTrace trace;
+  int ret = client->put_object(path, &iov, 1, nullptr, &trace);
+  ASSERT_EQ(ret, (ssize_t)sizeof(buf));
+  EXPECT_EQ(trace.http_code, 200);
+  EXPECT_TRUE(!trace.request_id.empty());
+  EXPECT_GE(trace.attempts, 1);
+  EXPECT_FALSE(trace.throttled);
+  EXPECT_GE(trace.server_time_ms, 1);
+
+  ObjectHeaderMeta hmeta;
+  ret = client->head_object(path, hmeta, &trace);
+  ASSERT_EQ(ret, 0);
+  EXPECT_EQ(trace.http_code, 200);
+  EXPECT_TRUE(!trace.request_id.empty());
+
+  // failure: a 404 still carries the server's response
+  char buf2[4];
+  iovec iov2{buf2, sizeof(buf2)};
+  ret = client->get_object_range(get_real_test_path("request_trace/missing"),
+                                 &iov2, 1, 0, nullptr, &trace);
+  ASSERT_EQ(ret, -1);
+  EXPECT_EQ(trace.http_code, 404);
+  EXPECT_TRUE(!trace.request_id.empty());
+
+  // reuse without reset(): `attempts` accumulates across calls
+  auto attempts = trace.attempts;
+  ret = client->head_object(path, hmeta, &trace);
+  ASSERT_EQ(ret, 0);
+  EXPECT_GE(trace.attempts, attempts + 1);
+
+  // reuse after reset(): fields start over
+  trace.reset();
+  ret = client->head_object(path, hmeta, &trace);
+  ASSERT_EQ(ret, 0);
+  EXPECT_EQ(trace.attempts, 1);
+  EXPECT_EQ(trace.http_code, 200);
+
+  // a multi-page listing accumulates `attempts` across pages
+  for (int i = 0; i < 2; i++) {
+    ret = client->put_object(
+        get_real_test_path("request_trace/page" + std::to_string(i)), &iov, 1);
+    ASSERT_EQ(ret, (ssize_t)sizeof(buf));
+  }
+  trace.reset();
+  std::vector<std::string> objects;
+  auto cb = [&](const ListObjectsCBParameters& cb) {
+    objects.emplace_back(std::string(cb.key));
+    return 0;
+  };
+  ret = client->list_objects(bucket_prefix_, cb, {}, nullptr, &trace);
+  ASSERT_EQ(ret, 0);
+  EXPECT_GE(objects.size(), 3);
+  EXPECT_GE(trace.attempts, 2);
+}
+
 TEST_F(BasicAuthOssTest, list_objects) { list_objects(); }
 TEST_F(BasicAuthOssTest, bucket_operations) { bucket_operations(); }
 TEST_F(BasicAuthOssTest, multipart) { multipart(); }
@@ -1040,6 +1102,7 @@ TEST_F(BasicAuthOssTest, copy_and_rename) { copy_and_rename(); }
 TEST_F(BasicAuthOssTest, symlink) { symlink(); }
 TEST_F(BasicAuthOssTest, batch_get_objects) { batch_get_objects(); }
 TEST_F(BasicAuthOssTest, get_object_ranges) { get_object_ranges(); }
+TEST_F(BasicAuthOssTest, request_trace) { request_trace(); }
 
 TEST_F(BasicAuthOssTest, upload_with_options) { upload_with_options(); }
 TEST_F(BasicAuthOssTest, fd_get_and_put) { fd_get_and_put(); }

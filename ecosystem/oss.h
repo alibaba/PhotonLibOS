@@ -106,6 +106,29 @@ struct ObjectHeaderMeta : public ObjectMeta {
 #undef DEFINE_OPTIONAL_FIELD
 };
 
+struct RequestTrace {
+  std::string request_id;       // x-oss-request-id, empty if server unreached
+  int http_code = 0;            // HTTP status code, 0 if server unreached
+
+  uint64_t server_time_ms = 0;  // x-oss-server-time
+  uint64_t qos_delay_ms = 0;    // x-oss-qos-delay-time, server-side QoS delay
+
+  bool throttled = false;       // HTTP 429 / QPS limit exceeded
+  uint64_t retry_after_ms = 0;  // Retry-After header, 0 if absent
+
+  int attempts = 0;             // requests sent, including retries
+
+  void reset() {
+    request_id.clear();
+    http_code = 0;
+    server_time_ms = 0;
+    qos_delay_ms = 0;
+    throttled = false;
+    retry_after_ms = 0;
+    attempts = 0;
+  }
+};
+
 template <typename T>
 class OptValue {
  public:
@@ -223,34 +246,40 @@ class Client : public Object {
 
   virtual int delete_bucket() = 0;
 
+  // A multi-page listing accumulates `attempts` across pages.
   virtual int list_objects(std::string_view prefix, ListObjectsCallback cb,
                            ListObjectsParameters = {},
-                           std::string* marker = nullptr) = 0;
+                           std::string* marker = nullptr,
+                           RequestTrace* trace = nullptr) = 0;
 
-  virtual int head_object(std::string_view object, ObjectHeaderMeta& meta) = 0;
+  virtual int head_object(std::string_view object, ObjectHeaderMeta& meta,
+                          RequestTrace* trace = nullptr) = 0;
 
   // return value is the real size if the operation succeeds, otherwise
   // return -1
   ssize_t get_object_range(std::string_view object, char* buf, size_t size,
-                           off_t offset, ObjectHeaderMeta* meta = nullptr) {
+                           off_t offset, ObjectHeaderMeta* meta = nullptr,
+                           RequestTrace* trace = nullptr) {
     return get_object_range(object, offset, size,
         [buf, size](IStream* input) -> ssize_t {
           return input->read(buf, size);
-        }, meta);
+        }, meta, trace);
   }
   ssize_t get_object_range(std::string_view object, const struct iovec* iov,
                            int iovcnt, off_t offset,
-                           ObjectHeaderMeta* meta = nullptr) {
+                           ObjectHeaderMeta* meta = nullptr,
+                           RequestTrace* trace = nullptr) {
     iovector_view view((struct iovec*)iov, iovcnt);
     return get_object_range(object, offset, view.sum(),
         [iov, iovcnt](IStream* input) -> ssize_t {
           return input->readv(iov, iovcnt);
-        }, meta);
+        }, meta, trace);
   }
 
   virtual ssize_t get_object_range(std::string_view object, off_t offset,
                                    size_t cnt, BodyReader reader,
-                                   ObjectHeaderMeta* meta = nullptr) = 0;
+                                   ObjectHeaderMeta* meta = nullptr,
+                                   RequestTrace* trace = nullptr) = 0;
 
   // Download several byte ranges of one object within a single GET request,
   // relying on the OSS multi-range extension.
@@ -265,42 +294,49 @@ class Client : public Object {
   // return 0 only if every iov is completely filled, -1 otherwise, with each
   // range's `result` set to its filled size for diagnosis.
   virtual int get_object_ranges(std::string_view object,
-                                std::vector<GetRangeParameters>& ranges) = 0;
+                                std::vector<GetRangeParameters>& ranges,
+                                RequestTrace* trace = nullptr) = 0;
 
   // return value is the object count which data is successfully downloaded.
   // It's possible only some objects get to be downloaded successfully.
   // return -1 if some other errors happen.
   // The batch_get_objects interface works only when whitelisting enabled
-  // at OSS server side.
-  virtual int batch_get_objects(std::vector<GetObjectParameters>& params) = 0;
+  // at OSS server side. One batch is one HTTP request, so the trace
+  // describes the whole batch; per-object failures are in `result`.
+  virtual int batch_get_objects(std::vector<GetObjectParameters>& params,
+                                RequestTrace* trace = nullptr) = 0;
 
   // return value is the object size if the operation succeeds, otherwise
   // return -1.
   // if expected_crc64 is specified, we will compare the value with the
   // returned object crc64 to validate the object integrity.
   ssize_t put_object(std::string_view object, const char* buf, size_t size,
-                     ObjectUploadOptions& opts) {
+                     ObjectUploadOptions& opts,
+                     RequestTrace* trace = nullptr) {
     return put_object(object, size,
         [buf, size](IStream* output) -> ssize_t {
           return output->write(buf, size);
-        }, opts);
+        }, opts, trace);
   }
   ssize_t put_object(std::string_view object, const struct iovec* iov,
-                     int iovcnt, uint64_t* expected_crc64 = nullptr) {
+                     int iovcnt, uint64_t* expected_crc64 = nullptr,
+                     RequestTrace* trace = nullptr) {
     ObjectUploadOptions opts{.expected_crc64 = expected_crc64};
-    return put_object(object, iov, iovcnt, opts);
+    return put_object(object, iov, iovcnt, opts, trace);
   };
   ssize_t put_object(std::string_view object, const struct iovec* iov,
-                     int iovcnt, ObjectUploadOptions& opts) {
+                     int iovcnt, ObjectUploadOptions& opts,
+                     RequestTrace* trace = nullptr) {
     iovector_view view((struct iovec*)iov, iovcnt);
     return put_object(object, view.sum(),
         [iov, iovcnt](IStream* output) -> ssize_t {
           return output->writev(iov, iovcnt);
-        }, opts);
+        }, opts, trace);
   }
 
   virtual ssize_t put_object(std::string_view object, size_t cnt,
-                             BodyWriter writer, ObjectUploadOptions& opts) = 0;
+                             BodyWriter writer, ObjectUploadOptions& opts,
+                             RequestTrace* trace = nullptr) = 0;
 
   // return value is the newly appended size if the operation succeeds,
   // otherwise return -1.
@@ -308,14 +344,15 @@ class Client : public Object {
   // returned object crc64 to validate the object integrity.
   ssize_t append_object(std::string_view object, const struct iovec* iov,
                         int iovcnt, off_t position,
-                        uint64_t* expected_crc64 = nullptr) {
+                        uint64_t* expected_crc64 = nullptr,
+                        RequestTrace* trace = nullptr) {
     ObjectUploadOptions opts{.expected_crc64 = expected_crc64};
-    return append_object(object, iov, iovcnt, position, opts);
+    return append_object(object, iov, iovcnt, position, opts, trace);
   };
   virtual ssize_t append_object(std::string_view object,
                                 const struct iovec* iov, int iovcnt,
-                                off_t position,
-                                ObjectUploadOptions& opts) = 0;
+                                off_t position, ObjectUploadOptions& opts,
+                                RequestTrace* trace = nullptr) = 0;
 
   int copy_object(std::string_view src_object, std::string_view dst_object,
                   bool overwrite = false, bool set_mime = false) {
