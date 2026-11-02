@@ -6,6 +6,15 @@
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
 
+// X509_get_subject_name()'s return qualifier follows the OpenSSL headers in use --
+// 1.1.1 hands back X509_NAME*, newer ones const X509_NAME* -- while the setters below
+// take a mutable one. One const_cast covers both: on the old signature it removes no
+// qualifier and is a no-op, so this needs no version macro to stay compatible with
+// either. The certificate is ours and writable, which is what makes the cast sound.
+inline X509_NAME* test_subject_name(X509* cert) {
+    return const_cast<X509_NAME*>(X509_get_subject_name(cert));
+}
+
 // Generate a self-signed cert at runtime, different from the hardcoded test cert.
 // Used in negative tests where a valid-but-wrong CA is needed.
 // Uses legacy RSA keygen API for compatibility across OpenSSL 1.0.2 ~ 3.x.
@@ -28,7 +37,7 @@ inline std::string generate_different_self_signed_cert() {
     X509_gmtime_adj(X509_get_notAfter(x509), 365 * 24 * 3600);
     X509_set_pubkey(x509, pkey);
 
-    auto name = X509_get_subject_name(x509);
+    X509_NAME* name = test_subject_name(x509);
     X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC,
         (unsigned char*)"WrongCA", -1, -1, 0);
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
