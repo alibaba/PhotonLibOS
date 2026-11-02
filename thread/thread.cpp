@@ -884,8 +884,6 @@ R"(
               "r15", VECTOR_CLOBBERS, "memory");
     }
 #else // _WIN64
-    // The Win64 thread-entry stub must reserve 32 bytes of shadow space
-    // for its calls to the thread entry and _photon_thread_die.
     asm(
 DEF_ASM_FUNC(_photon_switch_context) // (void** rcx_to, void** rdx_from)
 R"(
@@ -912,6 +910,8 @@ R"(
         jmp     *%rdx
 )"
 
+// Reserve 32 bytes of shadow space for the calls to
+// the thread entry and _photon_thread_die.
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
         sub     $32, %rsp
