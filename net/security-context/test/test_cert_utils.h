@@ -9,11 +9,9 @@
 #include <openssl/rsa.h>
 #include <openssl/opensslv.h>
 
-// X509_get_subject_name()'s return qualifier follows the OpenSSL headers in use --
-// 1.1.1 hands back X509_NAME*, newer ones const X509_NAME* -- while the setters below
-// take a mutable one. One const_cast covers both: on the old signature it removes no
-// qualifier and is a no-op, so this needs no version macro to stay compatible with
-// either. The certificate is ours and writable, which is what makes the cast sound.
+// X509_get_subject_name()'s return qualifier differs between OpenSSL releases (the
+// macOS arm image returns const, 1.1.1 does not) while the setters take a mutable
+// X509_NAME*. The certificate is ours and writable, so take the writable view back.
 inline X509_NAME* test_subject_name(X509* cert) {
     return const_cast<X509_NAME*>(X509_get_subject_name(cert));
 }
