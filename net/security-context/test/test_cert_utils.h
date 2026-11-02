@@ -9,13 +9,6 @@
 #include <openssl/rsa.h>
 #include <openssl/opensslv.h>
 
-// X509_get_subject_name()'s return qualifier differs between OpenSSL releases (the
-// macOS arm image returns const, 1.1.1 does not) while the setters take a mutable
-// X509_NAME*. The certificate is ours and writable, so take the writable view back.
-inline X509_NAME* test_subject_name(X509* cert) {
-    return const_cast<X509_NAME*>(X509_get_subject_name(cert));
-}
-
 // Generate a self-signed cert at runtime, different from the hardcoded test cert.
 // Used in negative tests where a valid-but-wrong CA is needed.
 inline std::string generate_different_self_signed_cert() {
@@ -38,7 +31,7 @@ inline std::string generate_different_self_signed_cert() {
     X509_gmtime_adj(X509_get_notAfter(x509), 365 * 24 * 3600);
     X509_set_pubkey(x509, pkey);
 
-    X509_NAME* name = test_subject_name(x509);
+    auto name = X509_get_subject_name(x509);
     X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC,
         (unsigned char*)"WrongCA", -1, -1, 0);
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
@@ -102,7 +95,7 @@ inline std::string test_pem_of_key(EVP_PKEY* pkey) {
 }
 
 inline void test_set_cert_name(X509* cert, const char* cn) {
-    X509_NAME* name = test_subject_name(cert);
+    auto name = X509_get_subject_name(cert);
     X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC,
         (unsigned char*)"PhotonTest", -1, -1, 0);
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
@@ -130,7 +123,7 @@ inline TestCertChain generate_ca_signed_cert(const std::vector<std::string>& san
     X509_gmtime_adj(X509_get_notAfter(ca), 365 * 24 * 3600);
     X509_set_pubkey(ca, ca_key);
     test_set_cert_name(ca, ca_cn);
-    X509_set_issuer_name(ca, test_subject_name(ca));
+    X509_set_issuer_name(ca, X509_get_subject_name(ca));
     {
         // CA:TRUE is mandatory: without basicConstraints the chain is rejected
         // before any name check happens, which would mask what these tests mean
@@ -153,7 +146,7 @@ inline TestCertChain generate_ca_signed_cert(const std::vector<std::string>& san
     X509_gmtime_adj(X509_get_notAfter(leaf), 365 * 24 * 3600);
     X509_set_pubkey(leaf, leaf_key);
     test_set_cert_name(leaf, cn);
-    X509_set_issuer_name(leaf, test_subject_name(ca));
+    X509_set_issuer_name(leaf, X509_get_subject_name(ca));
     {
         X509V3_CTX v3ctx;
         X509V3_set_ctx_nodb(&v3ctx);
