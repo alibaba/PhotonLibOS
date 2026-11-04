@@ -830,10 +830,7 @@ R"(
 // the thread entry and _photon_thread_die.
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
-<<<<<<< HEAD
-=======
         sub     $32, %rsp
->>>>>>> b8e059c ([Backport][main to 0.9] | fix(thread): complete context-switch clobbers and reserve Win64 shadow space (#1720) (#1725) (#1726))
         mov     0x40(%rbp), %rcx
         movq    $0, 0x40(%rbp)
         call    *0x48(%rbp)
