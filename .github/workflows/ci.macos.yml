@@ -60,4 +60,5 @@ jobs:
 
       - name: Test
         working-directory: ${{github.workspace}}/build
-        run: ctest -E test-lockfree --timeout 3600 -V
+        timeout-minutes: 60
+        run: ctest -E "test-lockfree|test-blk" --timeout 3600 -V

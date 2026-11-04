@@ -38,6 +38,23 @@ photon_option(PHOTON_ENABLE_LIBCURL      BOOL   ON    "enable libcurl")
 photon_option(PHOTON_DEFAULT_LOG_LEVEL   STRING "0"   "default log level")
 photon_option(PHOTON_BUILD_OCF_CACHE     BOOL   OFF   "enable ocf cache")
 photon_option(PHOTON_ENABLE_KCP          BOOL   OFF   "enable kcp")
+# ON by default because blk was never optional until this knob existed: no
+# configuration ever excluded it. Defaulting this OFF would drop all of it -- and
+# every blk suite -- out of a default build and out of CI, which passes no -D for it.
+# It is forced OFF on Windows below, because blk/ is POSIX.
+photon_option(PHOTON_ENABLE_BLK          BOOL   ON    "enable blk/: nbd, tcmu, ublk, vduse, vhost-user block-device exports")
+
+# blk/ is POSIX-only: blk/utils.cpp's device lock is flock() behind <sys/file.h> and
+# <unistd.h>, its socket-side helpers use <sys/un.h>, and none of those exist for
+# MSVC -- the Windows compatibility layer shims none of them. Forcing the switch off
+# rather than merely defaulting it off is deliberate: an ON that a caller asked for
+# would otherwise fail inside two files no Windows user asked for, and there is no
+# Windows implementation to fall back on.
+if (WIN32 AND PHOTON_ENABLE_BLK)
+    message(STATUS "PHOTON_ENABLE_BLK forced off on Windows: blk/ is POSIX-only (flock, <sys/un.h>)")
+    set(PHOTON_ENABLE_BLK OFF CACHE BOOL
+            "enable blk/: nbd, tcmu, ublk, vduse, vhost-user block-device exports" FORCE)
+endif ()
 
 # Download locations for build-from-source (used when PHOTON_BUILD_DEPENDENCIES is ON).
 photon_option(PHOTON_BUILD_DEPENDENCIES  BOOL   OFF   "")
@@ -45,7 +62,7 @@ photon_source(AIO_SOURCE        "https://codeberg.org/jmoyer/libaio/releases/dow
 photon_source(ZLIB_SOURCE       "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz")
 photon_source(OPENSSL_SOURCE    "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz")
 photon_source(CURL_SOURCE       "https://github.com/curl/curl/releases/download/curl-7_88_1/curl-7.88.1.tar.gz")
-photon_source(URING_SOURCE      "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz")
+photon_source(URING_SOURCE      "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.15.tar.gz")
 photon_source(FUSE_SOURCE       "")
 photon_source(GSASL_SOURCE      "")
 photon_source(DPDK_SOURCE       "https://github.com/DPDK/dpdk/archive/refs/tags/v20.11.6.tar.gz")
@@ -219,6 +236,42 @@ photon_module(ecosystem
         REQUIRES http
         SOURCES  ecosystem/*.cpp
         OBJ_LINK ecosystem_deps)
+# The whole blk/ subtree sits behind ONE user-facing switch, PHOTON_ENABLE_BLK.
+# photon_module() ANDs OPTION with ENABLE, so each transport below is built when
+# that switch is on AND its own target is suitable -- and there is deliberately no
+# per-transport knob, because "which transports can this build carry" is a fact
+# about the target, not a second preference the caller should have to state. The
+# two CLI tools further down and the suites in blk/test/ read the
+# PHOTON_MODULE_<name>_ENABLED properties these declarations record, so the switch
+# is the only place anyone decides whether blk is in the build and everything under
+# blk/ follows it -- which is also why the POSIX-only constraint is applied to the
+# switch itself (PHOTON_ENABLE_BLK is forced off on Windows) instead of to a
+# platform clause on the two modules every transport needs.
+photon_module(blk
+        OPTION  PHOTON_ENABLE_BLK
+        SOURCES blk/nbd.cpp)
+photon_module(blk_utils
+        OPTION  PHOTON_ENABLE_BLK
+        SOURCES blk/utils.cpp)   # shared blk internals: the flock-based device lock and
+                                 # the leaf helpers nbd.cpp calls on every POSIX platform,
+                                 # plus, under #ifdef __linux__, the genetlink client and
+                                 # the virtio-blk core of vduse/vhost-user
+photon_module(blk_vhost_user
+        OPTION  PHOTON_ENABLE_BLK
+        ENABLE  LINUX   # eventfd + SCM_RIGHTS fd passing + memfd guest memory
+        SOURCES blk/vhost-user.cpp)
+photon_module(blk_tcmu
+        OPTION  PHOTON_ENABLE_BLK
+        ENABLE  LINUX
+        SOURCES blk/tcmu.cpp)
+photon_module(blk_ublk
+        OPTION  PHOTON_ENABLE_BLK
+        ENABLE  LINUX AND PHOTON_ENABLE_URING   # ublk's rings go through the iouring engine
+        SOURCES blk/ublk.cpp)
+photon_module(blk_vduse
+        OPTION  PHOTON_ENABLE_BLK
+        ENABLE  LINUX
+        SOURCES blk/vduse.cpp)
 photon_module(testing
         OPTION    PHOTON_BUILD_TESTING
         FETCH     gflags googletest)
@@ -353,6 +406,55 @@ if (WIN32 AND PHOTON_BUILD_DEPENDENCIES)
     target_compile_definitions(photon_obj PRIVATE CURL_STATICLIB)
 endif ()
 
+# Operator-facing tools, built beside the blk transports they drive instead of
+# under PHOTON_BUILD_TESTING because they are useful in production, not only in
+# tests: vduse-cli diagnoses and unwedges a live vduse device, and vhost-user-cli
+# serves an image so an independent frontend can be pointed at blk/vhost-user.cpp.
+# Static, so either binary can be copied onto a wedged machine with no
+# libphoton.so and no rpath to satisfy. Not registered with CTest -- both need
+# arguments, vduse-cli needs root, and neither is a test.
+#
+# Each tool is gated on ITS OWN TRANSPORT's enable state, not on a condition
+# restated here: if photon's build carries the transport, it carries the tool that
+# drives it, and if that transport's gate ever narrows or widens the tool follows
+# without this block being edited. PHOTON_MODULE_<name>_ENABLED is the property
+# photon_module() records and the same one photon_module_targets() and
+# photon_module_link_into() gate on, so "this transport is in the build" has one
+# meaning rather than two that can drift. Both transports' gate today is
+# PHOTON_ENABLE_BLK AND LINUX, and this block names neither: switching blk off
+# drops both tools exactly as narrowing the transports' ENABLE would. But the
+# reason each tool needs Linux is not the transport's reason. vhost-user-cli draws
+# blk_vhost_user's symbols (new_vhost_user_controller, VhostUserController::Config);
+# vduse-cli draws no symbol from blk/vduse.cpp and needs it for <linux/virtio_blk.h>
+# and <linux/virtio_config.h>. Restating LINUX here would have been a third
+# independent gate for two tools that each have their own.
+#
+# Both keep .cc even though they ARE build targets, an exception to AGENTS.md's
+# ".cc is for assistant programs not included in normal compilation". Here the
+# extension is doing work rather than marking neglect: it keeps them out of any
+# `blk/*.cpp` source glob, as net/http/huffman/gen_tree.cc stays out of the real
+# net/http/huffman/*.cpp glob in photon_module(http). blk has no such glob today --
+# every photon_module(blk*) names its single file -- so here the extension is
+# insurance against one being added rather than a live need.
+#
+# Placement is load-bearing. CMAKE_RUNTIME_OUTPUT_DIRECTORY is captured at
+# add_executable time, and the PHOTON_BUILD_TESTING block below repoints it at
+# examples-output before pointing it back at output. Declaring these two above that
+# block is what lands both binaries in <build-dir>/output/ beside every other
+# executable; declaring them between those two set() calls would put them in
+# examples-output instead, and nothing in the build would say so.
+get_property(_blk_vduse_enabled GLOBAL PROPERTY PHOTON_MODULE_blk_vduse_ENABLED)
+if (_blk_vduse_enabled)
+    add_executable(vduse-cli blk/vduse-cli.cc)
+    target_link_libraries(vduse-cli PRIVATE photon_static)
+endif ()
+
+get_property(_blk_vhost_user_enabled GLOBAL PROPERTY PHOTON_MODULE_blk_vhost_user_ENABLED)
+if (_blk_vhost_user_enabled)
+    add_executable(vhost-user-cli blk/vhost-user-cli.cc)
+    target_link_libraries(vhost-user-cli PRIVATE photon_static)
+endif ()
+
 # Build examples and test cases
 if (PHOTON_BUILD_TESTING)
     include(photon-test-helpers)
@@ -381,6 +483,18 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(net/http/test)
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
+    # The blk suites test the blk transports, so they follow the same one switch.
+    # PHOTON_MODULE_blk_ENABLED IS PHOTON_ENABLE_BLK -- module blk carries no ENABLE
+    # clause of its own, and the switch is the place the POSIX-only rule lives (it is
+    # forced off on Windows) -- read here as the recorded property rather than
+    # restated, so the test tree and the library cannot disagree about whether blk is
+    # in the build. The gate is load-bearing, not tidy: blk/test/harness.cpp calls
+    # blk::run_off_vcpu, defined in blk/utils.cpp, and every suite below compiles
+    # harness.cpp, so with the switch off nothing here would link.
+    get_property(_blk_enabled GLOBAL PROPERTY PHOTON_MODULE_blk_ENABLED)
+    if (_blk_enabled)
+        add_subdirectory(blk/test)
+    endif ()
     add_subdirectory(net/security-context/test)
     if (NOT APPLE)
         add_subdirectory(fs/cache/test)

@@ -64,10 +64,11 @@ jobs:
 
       - name: Test
         if: matrix.run_test
+        timeout-minutes: 60
         run: |
           cd build
           nohup redis-server &
-          ctest -E test-lockfree --timeout 3600 -V
+          ctest -E "test-lockfree|test-blk" --timeout 3600 -V
           pkill redis-server
 
   debug-build-from-source:

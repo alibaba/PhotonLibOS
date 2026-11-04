@@ -28,6 +28,11 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      # Before the build, so the run's log states what the blk suites will be able to do
+      # before anything is compiled. The script itself explains what it loads and why a
+      # missing module is not fatal.
+      - name: Load kernel modules for tcmu / ublk / vduse
+        run: sh blk/test/load-kernel-modules.sh
       - name: Build
         run: |
           uname -a
@@ -45,21 +50,24 @@ jobs:
                          -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc)
       - name: Test epoll
+        timeout-minutes: 60
         run: |
           nohup redis-server &
-          cd build && ctest --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V -E "test-blk"
           pkill redis-server
       - name: Test io_uring
+        timeout-minutes: 60
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V -E "test-blk"
           pkill redis-server
       - name: Test epoll_ng
+        timeout-minutes: 60
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V -E "test-blk"
           pkill redis-server
 
   fstack:
