@@ -100,9 +100,12 @@ IDialer* new_pool_dialer(IDialer* underlay, bool ownership = false,
 // Build the standard single-vCPU stack. If context is null, a default context
 // is created and owned by the returned stack. Otherwise the caller owns the
 // context and must keep it alive until the returned stack and every stream
-// checked out from its outer pool are destroyed.
+// checked out from its outer pool are destroyed. `expiration` is the max idle
+// time in microseconds of the pooled connections; -1ULL never expires them and
+// 0 is treated as -1ULL.
 IDialer* new_http_dialer(TLSContext* context = nullptr,
-                         const std::vector<IPAddr>& bind_ips = {});
+                         const std::vector<IPAddr>& bind_ips = {},
+                         uint64_t expiration = -1ULL);
 
 // Make a cross-vCPU dispatcher. Its factory is invoked lazily on each vCPU and
 // may therefore run concurrently; its captured state must remain alive and be

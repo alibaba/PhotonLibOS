@@ -134,6 +134,84 @@ TEST(http_client, response_allocation_failure_closes_connection) {
     EXPECT_EQ(2, connections); // the abandoned response cannot poison pool reuse
 }
 
+TEST(http_client, connection_idle_expiration_expires_pooled_connection) {
+    std::unique_ptr<ISocketServer> tcp(new_tcp_socket_server());
+    ASSERT_EQ(0, tcp->bind_v4localhost());
+    ASSERT_EQ(0, tcp->listen());
+    std::unique_ptr<HTTPServer> server(new_http_server());
+    server->add_handler(new SimpleHandler, true, "/simple");
+    auto handler = server->get_connection_handler();
+    int connections = 0;
+    auto counted = [&](ISocketStream* stream) {
+        ++connections;
+        return handler(stream);
+    };
+    tcp->set_handler(counted);
+    ASSERT_EQ(0, tcp->start_loop());
+
+    std::unique_ptr<Client> client(new_http_client());
+    client->timeout(5'000'000);
+    client->set_connection_idle_expiration(300'000);
+    EXPECT_EQ(300'000, client->connection_idle_expiration());
+    auto target = std::string("http://127.0.0.1:") +
+        std::to_string(tcp->getsockname().port) + "/simple";
+    auto request = [&] {
+        Client::OperationOnStack<1024> op(client.get(), Verb::GET, target);
+        ASSERT_EQ(0, op.req.headers.content_length(0));
+        op.retry = 0;
+        ASSERT_EQ(0, op.call());
+        EXPECT_EQ(200, op.resp.status_code());
+        char buf[64];
+        while (op.resp.read(buf, sizeof(buf)) > 0) {}  // drain for pool reuse
+    };
+
+    request();
+    EXPECT_EQ(1, connections);
+    request();
+    EXPECT_EQ(1, connections); // reused while idle within the timeout
+    photon::thread_usleep(4 * 300'000);
+    request();
+    EXPECT_EQ(2, connections); // the expired connection is not reused
+}
+
+TEST(http_client, zero_connection_idle_expiration_never_expires) {
+    std::unique_ptr<ISocketServer> tcp(new_tcp_socket_server());
+    ASSERT_EQ(0, tcp->bind_v4localhost());
+    ASSERT_EQ(0, tcp->listen());
+    std::unique_ptr<HTTPServer> server(new_http_server());
+    server->add_handler(new SimpleHandler, true, "/simple");
+    auto handler = server->get_connection_handler();
+    int connections = 0;
+    auto counted = [&](ISocketStream* stream) {
+        ++connections;
+        return handler(stream);
+    };
+    tcp->set_handler(counted);
+    ASSERT_EQ(0, tcp->start_loop());
+
+    std::unique_ptr<Client> client(new_http_client());
+    client->timeout(5'000'000);
+    client->set_connection_idle_expiration(0);  // rejected as -1ULL, see client.h
+    auto target = std::string("http://127.0.0.1:") +
+        std::to_string(tcp->getsockname().port) + "/simple";
+    auto request = [&] {
+        Client::OperationOnStack<1024> op(client.get(), Verb::GET, target);
+        ASSERT_EQ(0, op.req.headers.content_length(0));
+        op.retry = 0;
+        ASSERT_EQ(0, op.call());
+        EXPECT_EQ(200, op.resp.status_code());
+        char buf[64];
+        while (op.resp.read(buf, sizeof(buf)) > 0) {}  // drain for pool reuse
+    };
+
+    request();
+    EXPECT_EQ(1, connections);
+    photon::thread_usleep(500'000);
+    EXPECT_EQ(1, connections); // still reusable: 0 must not expire anything
+    request();
+    EXPECT_EQ(1, connections);
+}
+
 TEST(http_client, get) {
     system("mkdir -p /tmp/ease_ut/http_test/");
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-gettestfile");
