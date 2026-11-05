@@ -39,6 +39,10 @@ namespace fs {
 const uint64_t kGB = 1024 * 1024 * 1024;
 const uint64_t kMaxFreeSpace = 50 * kGB;
 const int64_t kEvictionMark = 5ll * kGB;
+// Tightest of three overflow limits: calcWaterMark scales capacity by
+// kWaterMarkRatio in uint64 before dividing, wrapping above 190,887,435 GB.
+// 1 PiB keeps the water marks sane; capacity-based eviction is off above it.
+const uint64_t kMaxCapacityInGB = 1024 * 1024; // 1 PiB
 
 FileCachePool::FileCachePool(IFileSystem* mediaFs, uint64_t capacityInGB,
     uint64_t periodInUs, uint64_t diskAvailInBytes, uint64_t refillUnit,
@@ -55,6 +59,12 @@ FileCachePool::FileCachePool(IFileSystem* mediaFs, uint64_t capacityInGB,
       exit_(false),
       isFull_(false),
       asyncInit_(asyncInit) {
+    if (capacityInGB_ > kMaxCapacityInGB) {
+        LOG_WARN("capacityInGB ` too large, clamped to `; capacity-based eviction "
+                 "is effectively off, only diskAvailInBytes(`) will trigger it",
+                 capacityInGB_, kMaxCapacityInGB, diskAvailInBytes_);
+        capacityInGB_ = kMaxCapacityInGB;
+    }
     int64_t capacityInBytes = capacityInGB_ * kGB;
     waterMark_ = calcWaterMark(capacityInBytes, kMaxFreeSpace);
     // keep this relation : waterMark < riskMark < capacity
