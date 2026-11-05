@@ -48,7 +48,7 @@ public:
     // multiple times, even for a thread_local instance. Therefore, ensure that there is no photon
     // thread switch inside the constructor. Place the initialization work in init() and ensure it
     // is initialized only once.
-    int init(TLSContext *_tls_ctx, std::vector<IPAddr> &src_ips) {
+    int init(TLSContext *_tls_ctx, std::vector<IPAddr> &src_ips, uint64_t ttl_us) {
         if (initialized)
             return 0;
         SCOPED_LOCK(init_mtx);
@@ -63,8 +63,11 @@ public:
         }
         auto tcp_cli = new_tcp_socket_client(src_ips.data(), src_ips.size());
         auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(src_ips.data(), src_ips.size()), true);
-        tcpsock.reset(new_tcp_socket_pool(tcp_cli, -1, true));
-        tlssock.reset(new_tcp_socket_pool(tls_cli, -1, true));
+        // 0 is treated as no expiration
+        if (ttl_us == 0)
+            ttl_us = -1UL;
+        tcpsock.reset(new_tcp_socket_pool(tcp_cli, ttl_us, true));
+        tlssock.reset(new_tcp_socket_pool(tls_cli, ttl_us, true));
         udssock.reset(new_uds_client());
         resolver.reset(new_default_resolver(kDNSCacheLife));
         initialized = true;
@@ -178,7 +181,7 @@ public:
     }
     PooledDialer& get_dialer() {
         thread_local PooledDialer dialer;
-        dialer.init(m_tls_ctx, m_bind_ips);
+        dialer.init(m_tls_ctx, m_bind_ips, m_connection_idle_expiration);
         return dialer;
     }
 

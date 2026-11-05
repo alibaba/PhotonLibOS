@@ -59,6 +59,9 @@ struct ClientOptions {
   // the virtual-hosted style http(s)://bucket.endpoint/object
   bool path_style = false;
   uint64_t request_timeout_us = 60ull * 1000 * 1000;
+  // Max idle time in microseconds before the underlying HTTP client closes a
+  // pooled connection; -1ULL keeps it until the peer closes it.
+  uint64_t connection_idle_expiration_us = -1ULL;
   int retry_times = 2;
 
   // When the request timeouts or encounters 5xx error, we will
