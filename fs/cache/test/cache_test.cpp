@@ -784,6 +784,9 @@ struct FileCachePoolTest {
     return p->idleTier_.contains(n);
   }
   static bool scan_done(FileCachePool *p) { return p->scanDone_.load(); }
+  static uint64_t water_mark(FileCachePool *p) { return p->waterMark_; }
+  static int64_t risk_mark(FileCachePool *p) { return p->riskMark_; }
+  static uint64_t capacity_in_gb(FileCachePool *p) { return p->capacityInGB_; }
 };
 
 // Poll until the background index scan finishes (or timeout). Returns true on
@@ -803,6 +806,63 @@ static bool openClose(ICachePool* pool, const char* name) {
   bool success = (s != nullptr);
   if (s) s->release();
   return success;
+}
+
+// `capacityInGB * kGB` used to overflow and wreck all three water marks
+// (negative riskMark_ -> instant ENOSPC on writes; huge waterMark_ -> eviction
+// wipes everything). The constructor now clamps the upper bound.
+TEST(CachePool, huge_capacity_does_not_overflow_water_marks) {
+  std::string root = "ease/cache/huge_capacity_test/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+  using T = FileCachePoolTest;
+
+  auto makePool = [&](uint64_t capacityInGB) {
+    auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
+    auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+    return new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024, capacityInGB,
+        1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
+  };
+
+  for (uint64_t capacityInGB : {uint64_t(1) << 33, uint64_t(1) << 34,
+                                UINT64_MAX}) {
+    auto roCachedFs = makePool(capacityInGB);
+    DEFER(delete roCachedFs);
+    auto pool = dynamic_cast<FileCachePool*>(roCachedFs->get_pool());
+    ASSERT_NE(nullptr, pool);
+
+    auto capacity = static_cast<int64_t>(T::capacity_in_gb(pool) * 1024 * 1024 * 1024);
+    // keep this relation : waterMark < riskMark < capacity
+    EXPECT_GT((int64_t)T::water_mark(pool), 0) << "capacityInGB=" << capacityInGB;
+    EXPECT_LT((int64_t)T::water_mark(pool), T::risk_mark(pool))
+        << "capacityInGB=" << capacityInGB;
+    EXPECT_LT(T::risk_mark(pool), capacity) << "capacityInGB=" << capacityInGB;
+
+    // Original symptom: the wrecked marks latch isFull_ after the first
+    // updateSpace(), so every later write gets ENOSPC.
+    auto f = roCachedFs->open("/write_probe", O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, f);
+    DEFER(delete f);
+    ASSERT_EQ(0, f->ftruncate(4 * 1024 * 1024));
+    std::vector<char> buf(1024 * 1024);
+    for (int i = 0; i < 4; i++) {
+      EXPECT_EQ((ssize_t)buf.size(),
+                f->pwrite(buf.data(), buf.size(), i * (off_t)buf.size()))
+          << "write #" << i << ", capacityInGB=" << capacityInGB;
+    }
+  }
+
+  // capacityInGB == 0 means "zero capacity, never cache": all marks are 0, so the
+  // first updateSpace() latches isFull_. RoCachedFs.BasicCacheFull depends on it,
+  // so the clamp must leave 0 alone.
+  auto roCachedFs = makePool(0);
+  DEFER(delete roCachedFs);
+  auto pool = dynamic_cast<FileCachePool*>(roCachedFs->get_pool());
+  ASSERT_NE(nullptr, pool);
+  EXPECT_EQ(0u, T::capacity_in_gb(pool));
+  EXPECT_EQ(0u, T::water_mark(pool));
+  EXPECT_EQ(0, T::risk_mark(pool));
 }
 
 TEST(CachePool, test_demote_threshold) {
