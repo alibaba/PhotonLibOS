@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include <fcntl.h>
 #include <photon/common/timeout.h>
 #include <photon/io/fd-events.h>
 #include <sys/uio.h>

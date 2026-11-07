@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 #include <type_traits>
 #include <utility>
+#include <photon/common/utility.h>
 
 // If class A can be enumerable with A::get() and A::next(),
 // then objects of A can be enumerated by the `for` statement
