@@ -20,6 +20,8 @@ limitations under the License.
 
 namespace photon {
 namespace fs{
+class ICacheStore;
+class ICachePool;
 template <class IForwardCachedFile>
 class ForwardCachedFileBase : public IForwardCachedFile {
 protected:
@@ -38,6 +40,8 @@ protected:
         return Base::m_file->query(offset, count);
     }
 };
+
+class ICachedFile;
 using ForwardCachedFile = ForwardCachedFileBase<photon::fs::ForwardFileBase<ICachedFile>>;
 using ForwardCachedFile_Ownership =
     ForwardCachedFileBase<photon::fs::ForwardFileBase_Ownership<ICachedFile>>;
@@ -60,6 +64,9 @@ protected:
         return Base::m_fs->set_pool(pool);
     }
 };
+
+class ICachedFileSystem;
+
 using ForwardCachedFS = ForwardCachedFSBase<photon::fs::ForwardFSBase<ICachedFileSystem>>;
 using ForwardCachedFS_Ownership =
     ForwardCachedFSBase<photon::fs::ForwardFSBase_Ownership<ICachedFileSystem>>;

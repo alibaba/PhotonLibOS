@@ -302,7 +302,8 @@ auto run(F &&f, Args &&... args) {
 }
 
 inline auto usleep(uint64_t time) {
-    return wrapper(photon::thread_usleep, time);
+    int (*f)(Timeout) = &photon::thread_usleep;
+    return wrapper(f, Timeout(time));
 }
 
 inline auto sleep(uint64_t time) { return wrapper(photon::thread_sleep, time); }

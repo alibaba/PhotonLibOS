@@ -37,9 +37,20 @@ limitations under the License.
 #define O_NONBLOCK 0x4000
 #endif
 
-// Windows/MinGW lacks posix_fadvise() and its POSIX_FADV_* constants.  The
-// fadvise() override on Windows is a no-op, so any integer value is safe;
-// using 0 for all of them keeps the shim minimal and call sites unchanged.
+#else
+// Non-Windows: forward to the real libc <fcntl.h>.
+#include_next <fcntl.h>
+#endif
+
+// posix_fadvise() and its POSIX_FADV_* constants are Linux-only: neither MinGW
+// nor Darwin has them (Darwin's SDK defines no POSIX_FADV_* and declares no
+// posix_fadvise at all).  Every platform that lacks them also lacks the
+// fadvise() override -- fs/localfs.cpp puts it under #ifdef __linux__, so the
+// base UNIMPLEMENTED(int fadvise(...)) in fs/filesystem.h handles the call and
+// the advice value never reaches a syscall.  Any integer is therefore safe; 0
+// for all of them keeps the shim minimal and call sites unchanged.  These are
+// outside the _WIN32 branch above and #ifndef-guarded, so Linux, whose <fcntl.h>
+// does define them, keeps the real values.
 #ifndef POSIX_FADV_NORMAL
 #define POSIX_FADV_NORMAL     0
 #endif
@@ -57,9 +68,4 @@ limitations under the License.
 #endif
 #ifndef POSIX_FADV_NOREUSE
 #define POSIX_FADV_NOREUSE    0
-#endif
-
-#else
-// Non-Windows: forward to the real libc <fcntl.h>.
-#include_next <fcntl.h>
 #endif
