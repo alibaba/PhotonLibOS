@@ -439,7 +439,7 @@ static std::string capture_client_hello_sni(const char* hostname) {
     g_captured_client_hello.clear();
     DEFER(photon::wait_all());
     auto srv = net::new_tcp_socket_server();  // plain TCP: just capture raw bytes
-    if (!srv) return {};
+    if (!srv) { ADD_FAILURE() << "failed to create SNI test server"; return {}; }
     DEFER(delete srv);
     if (srv->bind_v4localhost() != 0) {
         ADD_FAILURE() << "failed to bind local SNI test server";
@@ -458,22 +458,27 @@ static std::string capture_client_hello_sni(const char* hostname) {
     auto ep = srv->getsockname();
 
     auto ctx = net::new_tls_context();
-    if (!ctx) return {};
+    if (!ctx) { ADD_FAILURE() << "failed to create TLS context"; return {}; }
     DEFER(delete ctx);
     auto tcp_cli = net::new_tcp_socket_client();
-    if (!tcp_cli) return {};
+    if (!tcp_cli) { ADD_FAILURE() << "failed to create TCP client"; return {}; }
     tcp_cli->timeout(1UL * 1000 * 1000);  // bounds the handshake with a plain TCP peer
     auto cli = net::new_tls_client(ctx, tcp_cli, true);
-    if (!cli) return {};
+    if (!cli) { ADD_FAILURE() << "failed to create TLS client"; return {}; }
     DEFER(delete cli);
     auto s = cli->connect(ep);
-    if (!s) return {};
+    if (!s) { ADD_FAILURE() << "failed to connect TLS client"; return {}; }
     DEFER(delete s);
 
     EXPECT_EQ(0, net::tls_stream_set_sni(s, hostname));
     char req = 'x';
     s->write(&req, 1);  // drives the client handshake -> sends the ClientHello
     sni_sem.wait(1);
+    EXPECT_GT(g_captured_client_hello.size(), 5u);
+    if (g_captured_client_hello.size() > 5) {
+        EXPECT_EQ(0x16, static_cast<unsigned char>(g_captured_client_hello[0]));
+        EXPECT_EQ(0x01, static_cast<unsigned char>(g_captured_client_hello[5]));
+    }
     return g_captured_client_hello;
 }
 
@@ -489,6 +494,9 @@ TEST(sni, ip_literals_omitted_from_client_hello) {
 
     auto ipv6_client_hello = capture_client_hello_sni("2001:db8::1");
     EXPECT_EQ(std::string::npos, ipv6_client_hello.find("2001:db8::1"));
+
+    auto dotted_ipv4_client_hello = capture_client_hello_sni("127.0.0.1.");
+    EXPECT_EQ(std::string::npos, dotted_ipv4_client_hello.find("127.0.0.1"));
 }
 
 TEST(sni, trailing_dot_removed_from_client_hello) {

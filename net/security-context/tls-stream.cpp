@@ -681,7 +681,6 @@ static bool is_ip_literal(const char* hostname) {
 // Send DNS `hostname` as SNI, telling the server which certificate to send.
 // RFC 6066 forbids literal IPv4 and IPv6 addresses in the HostName field.
 static int tls_set_sni(SSL* ssl, const char* hostname) {
-    if (is_ip_literal(hostname)) return 0;
     // A terminal root dot is part of absolute DNS notation, not the SNI name
     // servers use for virtual-host selection. Match certificate verification.
     std::string normalized_hostname;
@@ -689,6 +688,10 @@ static int tls_set_sni(SSL* ssl, const char* hostname) {
     if (len > 1 && hostname[len - 1] == '.') {
         normalized_hostname.assign(hostname, len - 1);
         hostname = normalized_hostname.c_str();
+    }
+    if (is_ip_literal(hostname)) {
+        LOG_DEBUG("SNI omitted for IP literal, ", VALUE(hostname));
+        return 0;
     }
     if (SSL_set_tlsext_host_name(ssl, hostname) != 1)
         LOG_ERROR_RETURN(EINVAL, -1, "failed to set SNI on tls stream, ", VALUE(hostname));
@@ -762,10 +765,6 @@ int tls_stream_set_sni(ISocketStream* stream, const char* hostname) {
     auto s = find_tls_stream(stream);
     if (!s)
         LOG_ERROR_RETURN(EINVAL, -1, "not a tls stream, ", VALUE(stream));
-    if (is_ip_literal(hostname)) {
-        LOG_DEBUG("SNI omitted for IP literal");
-        return 0;
-    }
     return tls_set_sni(s->ssl, hostname);
 #else
     LOG_ERROR_RETURN(ENOSYS, -1, "SNI requires OpenSSL 1.0.2 or later, ", VALUE(hostname));
