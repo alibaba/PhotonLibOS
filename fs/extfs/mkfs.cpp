@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "extfs.h"
+#include "extfs_io.h"
 #include "default_uuid.h"
 #include <limits.h>
 #include <ext2fs/ext2_fs.h>
@@ -48,7 +49,7 @@ int mkdir_lost_found(ext2_filsys fs) {
     return 0;
 }
 
-int do_mkfs(io_manager manager, size_t size, char *uuid) {
+int do_mkfs(photon::fs::IFile *file, size_t size, char *uuid) {
     int blocksize = 4096;
     blk64_t blocks_count = size / blocksize;
     int inode_ratio = 16384;
@@ -91,7 +92,7 @@ int do_mkfs(io_manager manager, size_t size, char *uuid) {
 
     ext2_filsys fs;
     // init superblock
-    errcode_t ret = ext2fs_initialize("virtual-dev", 0, &fs_param, manager, &fs);
+    errcode_t ret = photon::fs::ext2fs_initialize(file, 0, &fs_param, &fs);
     if (ret) {
         LOG_ERRNO_RETURN(0, -1, "error while setting up superblock ", VALUE(ret));
     }
@@ -140,17 +141,14 @@ int do_mkfs(io_manager manager, size_t size, char *uuid) {
 namespace photon {
 namespace fs {
 
-extern io_manager new_io_manager(photon::fs::IFile *file);
-
 int make_extfs(photon::fs::IFile *file, char *uuid) {
     struct stat st;
     auto ret = file->fstat(&st);
     if (ret) return ret;
-    auto manager = new_io_manager(file);
     if (uuid == nullptr) {
         uuid = (char *)DEFAULT_UUID;
     }
-    ret = do_mkfs(manager, st.st_size, uuid);
+    ret = do_mkfs(file, st.st_size, uuid);
     return ret;
 }
 

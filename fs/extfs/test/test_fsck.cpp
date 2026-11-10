@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "../extfs.h"
+#include "../extfs_io.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <vector>
@@ -30,26 +31,17 @@ limitations under the License.
 static const char *IMAGE_PATH = "/tmp/extfs_fsck_test.img";
 static const char *DEFAULT_UUID_STR = "bdf7bb2e-c231-43ce-87c2-299792458ef5";
 
-namespace photon {
-namespace fs {
-extern io_manager new_io_manager(photon::fs::IFile *file);
-}
-}
-
 // Open the image with libext2fs directly, so that a test can both fabricate the
-// defects of an old image and inspect what fsck_extfs did about them. Only one
-// of these may be alive at a time, the io manager keeps a single backend file.
+// defects of an old image and inspect what fsck_extfs did about them.
 static ext2_filsys open_raw(photon::fs::IFile *image) {
-    auto manager = photon::fs::new_io_manager(image);
     ext2_filsys fs = nullptr;
-    auto err = ext2fs_open2("virtual-dev", nullptr,
-                            EXT2_FLAG_RW | EXT2_FLAG_64BITS | EXT2_FLAG_IGNORE_CSUM_ERRORS,
-                            0, 0, manager, &fs);
+    auto err = photon::fs::ext2fs_open2(
+        image, EXT2_FLAG_RW | EXT2_FLAG_64BITS | EXT2_FLAG_IGNORE_CSUM_ERRORS,
+        0, 0, &fs);
     if (err) {
         LOG_ERROR("ext2fs_open2 failed, err=`", err);
         return nullptr;
     }
-    fs->io->manager->zeroout = nullptr;
     fs->now = 1;
     return fs;
 }

@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "extfs.h"
+#include "extfs_io.h"
 #include <ext2fs/ext2_fs.h>
 #include <ext2fs/ext2fs.h>
 #include <photon/common/alog.h>
@@ -26,26 +27,21 @@ extern errcode_t resize_fs(ext2_filsys fs, blk64_t *new_size, int flags,
 namespace photon {
 namespace fs {
 
-extern io_manager new_io_manager(photon::fs::IFile *file);
-
 int resize_extfs(photon::fs::IFile *file, uint64_t new_size, int flags) {
-    auto manager = new_io_manager(file);
-
-    ext2_filsys fs;
-    errcode_t ret = ext2fs_open2("virtual-dev", NULL,
-                                  EXT2_FLAG_RW | EXT2_FLAG_64BITS,
-                                  0, 0, manager, &fs);
+    ext2_filsys fs = nullptr;
+    errcode_t ret = ext2fs_open2(file, EXT2_FLAG_RW | EXT2_FLAG_64BITS,
+                                 0, 0, &fs);
     if (ret) {
         LOG_ERRNO_RETURN(0, -1, "ext2fs_open2 failed, ret=`", ret);
     }
 
     fs->default_bitmap_type = EXT2FS_BMAP64_RBTREE;
-    fs->io->manager->zeroout = NULL;
 
     blk64_t blks = new_size / fs->blocksize;
     ret = resize_fs(fs, &blks, flags, NULL);
     if (ret) {
         uint64_t min_size = (uint64_t)blks * fs->blocksize;
+        // resize_fs() leaves old_fs to the caller only on failure
         ext2fs_close_free(&fs);
         if (ret == EXT2_ET_TOOSMALL) {
             LOG_ERROR_RETURN(0, -1, "resize_fs failed: target too small, minimum size required: ` MB (` blocks)",
@@ -53,7 +49,7 @@ int resize_extfs(photon::fs::IFile *file, uint64_t new_size, int flags) {
         }
         LOG_ERROR_RETURN(0, -1, "resize_fs failed, ret=`", ret);
     }
-    ext2fs_close_free(&fs);
+    // On success resize_fs() has already freed old_fs; do not close it here
     return 0;
 }
 
