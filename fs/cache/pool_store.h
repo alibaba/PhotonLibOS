@@ -184,20 +184,26 @@ namespace fs
 
         void release(bool detach = false)
         {
-            bool should_delete = false;
+            bool do_detach = false;
+            if (detach) {
+                SCOPED_LOCK(mt_);
+                do_detach = !detached_;
+                detached_ = true;
+            }
+            // Detach first so the last releaser cannot delete a pool-owned store.
+            if (do_detach) pool_->store_release(this, true);
+
+            bool do_release = false, should_delete = false;
             {
                 SCOPED_LOCK(mt_);
-                if ((detach || need_detach_) && !detached_) {
-                    detached_ = true;
-                    pool_->store_release(this, true);
-                }
-
-                auto ref = ref_.fetch_sub(1, std::memory_order_relaxed);
+                auto ref = ref_.fetch_sub(1, std::memory_order_acq_rel);
                 if (ref == 1 && pool_) {
-                    if (!detached_) pool_->store_release(this);
-                    else should_delete = true;
+                    if (detached_) should_delete = true;
+                    else do_release = true;
                 } else if (ref == 0) should_delete = true;  // call do_open directly
             }
+
+            if (do_release) pool_->store_release(this);
             if (should_delete) delete this;
         }
 
@@ -290,7 +296,6 @@ namespace fs
         bool truncated_ = false;
         bool recycled_ = false;
         bool detached_ = false;
-        bool need_detach_ = false;
         friend class ICachePool;
     };
 
