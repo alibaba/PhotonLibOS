@@ -109,6 +109,11 @@ namespace photon
             return 0;
         }
 
+        // The empty name, meaning no engine at all. init() installs a master
+        // engine only when the request names one, and fd_events_fini() puts this
+        // back, so this covers both the window before that install and after it.
+        std::string_view get_engine_name() const override { return {}; }
+
         __attribute__((noinline))
         ssize_t wait_and_fire_events(uint64_t timeout) override {
             DEFER(notify.store(false, std::memory_order_release));
@@ -290,7 +295,10 @@ namespace photon
         }
 
         void die() __attribute__((always_inline));
-        void dequeue_ready_atomic(states newstat = states::READY);
+        // `waitq_locked` tells that the caller is already holding this->waitq->lock,
+        // as photon::spinlock is NOT recursive
+        void dequeue_ready_atomic(states newstat = states::READY,
+                                  bool waitq_locked = false);
         vcpu_t* get_vcpu() {
             return (vcpu_t*)vcpu;
         }
@@ -727,12 +735,12 @@ namespace photon
         }
     };
 
-    inline void thread::dequeue_ready_atomic(states newstat)
+    inline void thread::dequeue_ready_atomic(states newstat, bool waitq_locked)
     {
         assert("this is not in runq, and this->lock is locked");
         if (waitq) {
             assert(waitq->front());
-            SCOPED_LOCK(waitq->lock);
+            SCOPED_LOCK(waitq->lock, (!waitq_locked) * 2);
             waitq->erase(this);
             waitq = nullptr;
         } else {
@@ -756,6 +764,53 @@ namespace photon
     static_assert(offsetof(thread, arg)   == 0x40, "...");
     static_assert(offsetof(thread, start) == 0x48, "...");
 
+    // switch_context() and switch_context_defer() hide a function call inside
+    // an asm statement, so the compiler can not see what happens across it:
+    // other photon threads run in between, and they may change any register
+    // and any memory. So, besides the GPRs, the asm statements must declare
+    // as clobbered all the vector / mask / flag registers that are not
+    // preserved by the switch, as well as "memory". Otherwise the compiler
+    // may keep a value in e.g. %xmm0 across the switch, and get garbage back.
+    //
+    // Note that the ABI's caller-saved (volatile) registers, e.g. all xmm on
+    // x86-64 SysV, are NOT implied clobbered here, as the compiler does not
+    // treat an asm statement as a call. Nor does the C++ call of these inline
+    // functions help: once inlined, there is no call boundary at all; and
+    // even if not, -fipa-ra (enabled at -O2) lets the caller keep values in
+    // the volatile registers that the callee, as told by these very clobber
+    // lists, does not use. On the other hand, the callee-saved ones (xmm6-15
+    // on Win64, v8-v15 on aarch64) must be listed too, as the switch does not
+    // save them like a real callee would do.
+    //
+    // See the GCC manual, Extended Asm, "Clobbers and Scratch Registers", and
+    // Optimize Options, "-fipa-ra".
+#if defined(__x86_64__)
+#ifdef __AVX512F__
+#define VECTOR_CLOBBERS_AVX512                                              \
+    "xmm16", "xmm17", "xmm18", "xmm19", "xmm20", "xmm21", "xmm22", "xmm23", \
+    "xmm24", "xmm25", "xmm26", "xmm27", "xmm28", "xmm29", "xmm30", "xmm31", \
+    "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7",
+#else
+#define VECTOR_CLOBBERS_AVX512
+#endif
+#define VECTOR_CLOBBERS VECTOR_CLOBBERS_AVX512                              \
+    "xmm0", "xmm1", "xmm2",  "xmm3",  "xmm4",  "xmm5",  "xmm6",  "xmm7",    \
+    "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"
+#elif defined(__aarch64__) || defined(__arm64__)
+#ifdef __ARM_FEATURE_SVE
+#define VECTOR_CLOBBERS_SVE                                                 \
+    "p0", "p1", "p2",  "p3",  "p4",  "p5",  "p6",  "p7",                    \
+    "p8", "p9", "p10", "p11", "p12", "p13", "p14", "p15",
+#else
+#define VECTOR_CLOBBERS_SVE
+#endif
+#define VECTOR_CLOBBERS VECTOR_CLOBBERS_SVE                                 \
+    "v0",  "v1",  "v2",  "v3",  "v4",  "v5",  "v6",  "v7",                  \
+    "v8",  "v9",  "v10", "v11", "v12", "v13", "v14", "v15",                 \
+    "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23",                 \
+    "v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31"
+#endif
+
 #if defined(__x86_64__)
 #if !defined(_WIN64)
     asm(
@@ -772,6 +827,9 @@ DEF_ASM_FUNC(_photon_switch_context_defer) // (void* rdi_arg, void (*rsi_defer)(
 R"(
         push    %rbp
         mov     %rsp, (%rcx)
+        mov     (%rdx), %rsp
+        pop     %rbp
+        jmp     *%rsi
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to_th)
@@ -811,7 +869,7 @@ R"(
                      : "+r"(t), "+r"(f)
                      :  // "0"(t), "1"(f)
                      : "rax", "rbx", "rcx", "rdx", "r8", "r9", "r10", "r11",
-                       "r12", "r13", "r14", "r15");
+                       "r12", "r13", "r14", "r15", VECTOR_CLOBBERS, "memory");
     }
 
     inline void switch_context_defer(thread* from, thread* to,
@@ -828,7 +886,7 @@ R"(
             : "+r"(t), "+r"(f), "+r"(a), "+r"(d)
             :  // "0"(t), "1"(f), "2"(a), "3"(d)
             : "rax", "rbx", "r8", "r9", "r10", "r11", "r12", "r13", "r14",
-              "r15");
+              "r15", VECTOR_CLOBBERS, "memory");
     }
 #else // _WIN64
     asm(
@@ -845,6 +903,9 @@ DEF_ASM_FUNC(_photon_switch_context_defer) // (void* rcx_arg, void (*rdx_defer)(
 R"(
         push    %rbp
         mov     %rsp, (%r9)
+        mov     (%r8), %rsp
+        pop     %rbp
+        jmp     *%rdx
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rcx_arg, void (*rdx_defer)(void*), void** r8_to)
@@ -854,8 +915,11 @@ R"(
         jmp     *%rdx
 )"
 
+// Reserve 32 bytes of shadow space for the calls to
+// the thread entry and _photon_thread_die.
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
+        sub     $32, %rsp
         mov     0x40(%rbp), %rcx
         movq    $0, 0x40(%rbp)
         call    *0x48(%rbp)
@@ -876,8 +940,7 @@ R"(
                      :  // "0"(t), "1"(f)
                      : "rax", "rbx", "rsi", "rdi", "r8", "r9",
                        "r10", "r11", "r12", "r13", "r14", "r15",
-                       "xmm6",  "xmm7",  "xmm8",  "xmm9",  "xmm10",
-                       "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+                       VECTOR_CLOBBERS, "memory");
     }
 
     inline void switch_context_defer(thread* from, thread* to,
@@ -895,8 +958,7 @@ R"(
             :  // "0"(t), "1"(f), "2"(a), "3"(d)
             : "rax", "rbx", "rsi", "rdi", "r10",
               "r11", "r12", "r13", "r14", "r15",
-              "xmm6",  "xmm7",  "xmm8",  "xmm9",  "xmm10",
-              "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+              VECTOR_CLOBBERS, "memory");
     }
 #endif // _WIN64
 
@@ -919,6 +981,10 @@ R"(
         stp x29, x30, [sp, #-16]!
         mov x29, sp
         str x29, [x3]
+        ldr x29, [x2]
+        mov sp, x29
+        ldp x29, x30, [sp], #16
+        br x1
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* x0_arg, void (*x1_defer)(void*), void** x2_to_th)
@@ -970,7 +1036,7 @@ R"(
                      "x2", "x3", "x4", "x5", "x6", "x7", "x8",
                      // Corouptable register, may change ,should save
                      "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
-                     "x17", "x18");
+                     "x17", "x18", VECTOR_CLOBBERS, "cc", "memory");
     }
 
     inline void switch_context_defer(thread* from, thread* to,
@@ -988,7 +1054,7 @@ R"(
                      : "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
                        "x27", "x28", "x29", "x30", "x4", "x5", "x6", "x7", "x8",
                        "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
-                       "x17", "x18");
+                       "x17", "x18", VECTOR_CLOBBERS, "cc", "memory");
     }
 #ifdef __clang__
 #pragma GCC diagnostic pop
@@ -1462,7 +1528,8 @@ insert_list:
         return do_thread_usleep(timeout, rq);
     }
 
-    static void prelocked_thread_interrupt(thread* th, int error_number)
+    static void prelocked_thread_interrupt(thread* th, int error_number,
+                                           bool waitq_locked = false)
     {
         vcpu_t* vcpu = th->get_vcpu();
         assert(th && th->state == states::SLEEPING);
@@ -1471,10 +1538,10 @@ insert_list:
         th->error_number = error_number;
         RunQ rq;
         if (unlikely(!rq.current || vcpu != rq.current->get_vcpu())) {
-            th->dequeue_ready_atomic(states::STANDBY);
+            th->dequeue_ready_atomic(states::STANDBY, waitq_locked);
             vcpu->move_to_standbyq_atomic(th);
         } else {
-            th->dequeue_ready_atomic();
+            th->dequeue_ready_atomic(states::READY, waitq_locked);
             vcpu->sleepq.pop(th);
             AtomicRunQ(rq).insert_tail(th);
         }
@@ -1927,15 +1994,20 @@ insert_list:
         if (!q.th || !cnt || !m_ooo_resume)
             return;
         SCOPED_LOCK(q.lock);
-        for (auto th = q.th->next();
-                  th!= q.th && cnt;
-                  th = th->next()) {
-            SCOPED_LOCK(th->lock);
-            auto& c = th->semaphore_count;
-            if (c <= cnt) {
-                cnt -= c;
-                prelocked_thread_interrupt(th, -1);
+        for (auto th = q.th->next(); th != q.th && cnt; ) {
+            // resuming th erases it from the queue, making its own next
+            // point to itself, so remember the successor beforehand
+            auto next = th->next();
+            {
+                SCOPED_LOCK(th->lock);
+                auto& c = th->semaphore_count;
+                if (c <= cnt) {
+                    cnt -= c;
+                    // q.lock is held by us, and it is not recursive
+                    prelocked_thread_interrupt(th, -1, true);
+                }
             }
+            th = next;
         }
     }
     inline bool semaphore::try_subtract(uint64_t count) {

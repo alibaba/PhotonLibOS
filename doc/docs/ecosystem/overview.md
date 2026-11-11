@@ -44,7 +44,7 @@ Source: `ecosystem/oss.h`, `ecosystem/oss.cpp`, `ecosystem/oss_constants.h`.
 - Single tree representation shared across all three formats.
 - `SimpleDOM::Document` parses from a buffer; nodes are accessed via path-like queries.
 - Designed for configuration parsing and small response bodies, not for large streaming documents.
-- Patches for `rapidjson` and `rapidxml` (used as backends) are kept in `ecosystem/patches/`.
+- `rapidjson` and `rapidxml` (used as backends) are used unmodified, without any patches.
 
 Source: `ecosystem/simple_dom.h`, `ecosystem/simple_dom.cpp`, `ecosystem/simple_dom_impl.h`.
 

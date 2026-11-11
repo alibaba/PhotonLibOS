@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "extfs.h"
+#include "default_uuid.h"
 #include <limits.h>
 #include <ext2fs/ext2_fs.h>
 #include <ext2fs/ext2fs.h>
@@ -24,10 +25,6 @@ limitations under the License.
 #include <photon/common/uuid4.h>
 #include <string>
 #include <fcntl.h>
-
-// 299792458 is the speed of light in m/s, a nod to photon; ef5 is the leading
-// part of EXT2_SUPER_MAGIC (0xef53)
-constexpr char DEFAULT_UUID[] = "bdf7bb2e-c231-43ce-87c2-299792458ef5";
 
 int mkdir_lost_found(ext2_filsys fs) {
     std::string name = "lost+found";
@@ -86,6 +83,9 @@ int do_mkfs(io_manager manager, size_t size, char *uuid) {
     fs_param.s_inodes_count = (n > UINT_MAX) ? UINT_MAX : n;
 
     ext2fs_r_blocks_count_set(&fs_param, reserved_ratio * ext2fs_blocks_count(&fs_param));
+    // two backup superblocks, the same way mke2fs spells num_backup_sb=2: one in
+    // block group 1, and ~0 as a placeholder for the last group, which
+    // ext2fs_initialize() clamps down to group_desc_count - 1
     fs_param.s_backup_bgs[0] = 1;
     fs_param.s_backup_bgs[1] = ~0;
 

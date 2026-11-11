@@ -292,8 +292,24 @@ photon::init(INIT_EVENT_DEFAULT, INIT_IO_LIBCURL);
 - `TLSContext`：证书、密钥、口令、验证模式、ALPN 协议列表。
 - `new_tls_stream(ctx, base, role)`：把 socket 包装为 TLS。
 - `new_tls_client/server(ctx, base)`：工厂包装。
-- `tls_stream_set_hostname()`：SNI。
+- `tls_stream_set_hostname()`：发送 SNI，并校验对端证书是否签发给该主机名。
+- `tls_stream_set_sni()`：仅发送 SNI，不做名称校验。
 - `tls_stream_get_alpn_selected()`：协商得到的 ALPN 协议。
+
+#### 校验服务端身份
+
+需要两项互相独立的检查，缺一不可：
+
+1. `set_verify_mode(VerifyMode::PEER)`（`set_ca_cert()` 与 `set_ca_file()` 会顺带打开 `PEER`）校验证书链是否由受信任的 CA 签发。这只能证明证书本身是真的，不能证明它属于谁。
+2. `tls_stream_set_hostname()` 校验证书确实签发给你要访问的主机。缺少这一步，任何由受信任 CA 签发的证书都会被接受，包括攻击者为自己控制的域名申请的证书。
+
+`tls_stream_set_hostname()` 必须在首次读写之前调用，因为客户端握手被推迟到那时才进行。主机名与 `dNSName` SAN 匹配，IP 字面量与 `iPAddress` SAN 匹配；证书不含 SAN 时回退到主题的 common name。通配符只匹配最左侧的一级标签，且不允许只覆盖标签的一部分（`www*.example.com` 会被拒绝）。
+
+名称校验由 OpenSSL 在校验证书链的过程中完成，因此依赖 `VerifyMode::PEER`。若在仍为 `VerifyMode::NONE` 的 context 上设置主机名，会返回 `-1` 并置 `EINVAL`，而不是静默通过。如只想发送 SNI 而不做名称校验，请使用 `tls_stream_set_sni()` 或 `TLSContext::set_verify_hostname(false)`，即 curl `CURLOPT_SSL_VERIFYHOST` 的对应物。
+
+`net::http::Client` 已经完成上述全部工作：它按 URL 中的主机进行校验，并按主机名分别池化 TLS 连接，因此为某个主机校验过的连接不会被另一个主机复用。你自行创建的 `TLSContext` 初始为 `VerifyMode::NONE`，两项检查都不生效；请调用 `set_verify_mode(VerifyMode::PEER)` 或加载 CA 来启用。
+
+RPC 的 `StubPool` 按 endpoint 连接，其 API 中没有主机名，因此无法做这项检查；那里的 TLS 只保护通道，不校验对端身份。
 
 ### SASL
 

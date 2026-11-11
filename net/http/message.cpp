@@ -142,7 +142,7 @@ int Message::send_header(net::ISocketStream* stream) {
         LOG_ERROR_RETURN(ENOBUFS, -1, "no buffer");
 
     memcpy(m_buf + m_buf_size + headers.size(), "\r\n", 2);
-    std::string_view sv = {m_buf, m_buf_size + headers.size() + 2ULL};
+    std::string_view sv = {m_buf, size_t(m_buf_size) + headers.size() + 2};
 
     ssize_t ret = m_stream->write(sv.data(), sv.size());
     if (ret < (ssize_t)sv.size())
@@ -297,6 +297,38 @@ inline size_t full_url_size(const URL& u) {
            (u.secure() ? sizeof(https_url_scheme) : sizeof(http_url_scheme)) - 1;
 }
 
+inline size_t decimal_size(uint16_t value) {
+    size_t size = 1;
+    while (value >= 10) {
+        value /= 10;
+        ++size;
+    }
+    return size;
+}
+
+inline size_t authority_size(const URL& u) {
+    return u.host().size() + 1 + decimal_size(u.port());
+}
+
+inline void append_authority(char*& buf, const URL& u) {
+    buf_append(buf, u.host());
+    buf_append(buf, ":");
+    buf_append(buf, u.port());
+}
+
+// A request to a TLS origin through a proxy travels inside a CONNECT tunnel, so
+// it is written in origin-form like any direct request; only a plaintext origin
+// is reached by handing the proxy an absolute-URI request to forward.
+inline bool use_absolute_uri(const URL& u, bool enable_proxy) {
+    return enable_proxy && !u.secure();
+}
+
+inline size_t request_line_size(Verb verb, const URL& url, bool enable_proxy) {
+    auto target_size = verb == Verb::CONNECT ? authority_size(url) :
+        (use_absolute_uri(url, enable_proxy) ? full_url_size(url) : url.target().size());
+    return verbstr[verb].size() + target_size + sizeof(" HTTP/1.1\r\n");
+}
+
 void Request::make_request_line(Verb v, const URL& u, bool enable_proxy) {
     m_secure = u.secure();
     m_port = u.port();
@@ -305,8 +337,18 @@ void Request::make_request_line(Verb v, const URL& u, bool enable_proxy) {
     buf_append(buf, verbstr[v]);
     buf_append(buf, " ");
     uint16_t target_disp = buf - m_buf;
+    // CONNECT names its target in authority-form: only the host and the port,
+    // neither scheme nor path -- it asks for a tunnel, not for a resource
+    if (v == Verb::CONNECT) {
+        m_target = {target_disp, authority_size(u)};
+        append_authority(buf, u);
+        m_path = m_query = {uint16_t(buf - m_buf), 0};
+        buf_append(buf, " HTTP/1.1\r\n");
+        m_buf_size = buf - m_buf;
+        return;
+    }
     m_target = {uint16_t(buf - m_buf), u.target().size()};
-    if (enable_proxy) {
+    if (use_absolute_uri(u, enable_proxy)) {
         m_target = {uint16_t(buf - m_buf), full_url_size(u)};
         buf_append(buf, u.secure() ? https_url_scheme : http_url_scheme);
         buf_append(buf, u.host_port());
@@ -328,7 +370,7 @@ Request::Request(void* buf, uint16_t buf_capacity, Verb v,
 
 int Request::reset(Verb v, std::string_view url, bool enable_proxy) {
     URL u(url);
-    if ((size_t)m_buf_capacity <= u.target().size() + 21 + verbstr[v].size())
+    if (request_line_size(v, u, enable_proxy) > m_buf_capacity)
         LOG_ERROR_RETURN(ENOBUFS, -1, "out of buffer");
 
     LOG_DEBUG("request reset ", VALUE(u.host()), VALUE(enable_proxy));
@@ -337,8 +379,11 @@ int Request::reset(Verb v, std::string_view url, bool enable_proxy) {
     make_request_line(v, u, enable_proxy);
     headers.reset(m_buf + m_buf_size, m_buf_capacity - m_buf_size);
 
-    // Host is always the first header
-    headers.insert("Host", u.host_port());
+    // Host is always the first header. CONNECT uses the exact authority-form
+    // target, including the port even when it is the scheme default.
+    auto host = v == Verb::CONNECT ? target() : u.host_port();
+    if (headers.insert("Host", host) < 0)
+        LOG_ERRNO_RETURN(0, -1, "failed to set Host");
     return 0;
 }
 
@@ -351,16 +396,42 @@ int Request::redirect(Verb v, estring_view location, bool enable_proxy) {
         location = full_location;
     }
     StoredURL u(location);
-    auto new_request_line_size = verbstr[v].size() + sizeof(" HTTP/1.1\r\n") +
-        (enable_proxy ? full_url_size(u) : u.target().size());
+    auto new_request_line_size = request_line_size(v, u, enable_proxy);
+    if (new_request_line_size > m_buf_capacity)
+        LOG_ERROR_RETURN(ENOBUFS, -1, "out of buffer");
+
+    estring authority;
+    std::string_view host = u.host_port();
+    if (v == Verb::CONNECT) {
+        authority.appends(u.host(), ":", u.port());
+        host = authority;
+    }
 
     int delta = (int)new_request_line_size - m_buf_size;
     LOG_DEBUG(VALUE(delta));
-    if (headers.reset_host(delta, u.host_port()) < 0)
+    if (headers.reset_host(delta, host) < 0)
         LOG_ERROR_RETURN(0, -1, "failed to move header data");
 
     m_buf_size = new_request_line_size;
     make_request_line(v, u, enable_proxy);
+    return 0;
+}
+
+int Request::copy_request_line(const Request& source) {
+    if (source.m_buf_size > m_buf_capacity)
+        LOG_ERROR_RETURN(ENOBUFS, -1, "request line does not fit outgoing buffer");
+    Message::reset();
+    memcpy(m_buf, source.m_buf, source.m_buf_size);
+    m_buf_size = source.m_buf_size;
+    m_verb = source.m_verb;
+    m_version = source.m_version;
+    m_target = source.m_target;
+    m_path = source.m_path;
+    m_query = source.m_query;
+    m_port = source.m_port;
+    m_secure = source.m_secure;
+    m_keep_alive = source.m_keep_alive;
+    headers.reset(m_buf + m_buf_size, m_buf_capacity - m_buf_size);
     return 0;
 }
 

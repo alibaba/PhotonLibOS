@@ -1,21 +1,21 @@
 name: Linux ARM
 
-# Runs triggered by removing an irrelevant label would have all jobs skipped, but they
-# still enter the concurrency group and would cancel an in-progress CI run. Divert them
-# into a separate '-noop' group so they never interfere with real CI runs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.event.action == 'unlabeled' && github.event.label.name != 'needs-manual-merge') && '-noop' || '' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Draft PRs don't run CI. Auto-PR opens conflicted backports as drafts, whose conflict
+# markers would fail the build anyway; marking one ready for review triggers a full run
+# against a freshly computed merge ref.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [ "main", "release/*" ]
 
 jobs:
   arm-linux-build-and-test:
     name: gcc${{ matrix.gcc }}-C++${{ matrix.cxx }}
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: arc-runner-set-arm
     strategy:
       fail-fast: false
@@ -64,24 +64,23 @@ jobs:
 
       - name: Test
         if: matrix.run_test
+        timeout-minutes: 60
         run: |
           cd build
           nohup redis-server &
-          ctest -E test-lockfree --timeout 3600 -V
+          ctest -E "test-lockfree|test-blk" --timeout 3600 -V
           pkill redis-server
 
   debug-build-from-source:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-26.04-arm
-    container:
-      image: almalinux:8
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: arc-runner-set-arm
     steps:
       - uses: actions/checkout@v4
       - name: Build
         run: |
-          dnf install -y 'dnf-command(config-manager)'
-          dnf config-manager --set-enabled powertools
-          dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++ nasm
+          sudo dnf install -y 'dnf-command(config-manager)'
+          sudo dnf config-manager --set-enabled powertools
+          sudo dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++ nasm
           source /opt/rh/gcc-toolset-9/enable
           cmake -B build -D CMAKE_BUILD_TYPE=Debug        \
                          -D PHOTON_BUILD_DEPENDENCIES=ON  \

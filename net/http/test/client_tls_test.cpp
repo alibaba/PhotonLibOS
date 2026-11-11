@@ -101,13 +101,20 @@ TEST(http_client, DISABLED_SNI) {
 }
 #endif
 
-// HTTP-level test: verify set_ca_cert works through the HTTP client.
-// Must run in a separate std::thread because the thread_local PooledDialer
-// caches the TLS context from previous tests; reusing it after the context
-// is freed would be a use-after-free.
+// HTTP-level test: verify set_ca_cert works through the HTTP client. Runs in
+// its own std::thread with a dedicated photon runtime so the client and its
+// per-client dialer (and the TLS context they hold) are created and torn down
+// in isolation from the other tests.
+//
+// The certificate must carry DNS:localhost, since loading a CA turns on peer
+// verification and the client now also checks the name in the URL against the
+// certificate. The shared cert in cert-key.cpp has no SAN and a common name of
+// DefaultCompanyLt, so it cannot serve this test.
 TEST(client_tls, http_with_ca_cert) {
-    // Server: TLS + HTTP, using self-signed cert
-    auto server_ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    auto chain = generate_ca_signed_cert({"DNS:localhost", "IP:127.0.0.1"}, "localhost");
+
+    // Server: TLS + HTTP, using a cert issued for localhost
+    auto server_ctx = net::new_tls_context(chain.cert_pem.c_str(), chain.key_pem.c_str(), nullptr);
     DEFER(delete server_ctx);
     auto tcpserver = net::new_tls_server(server_ctx, net::new_tcp_socket_server(), true);
     DEFER(delete tcpserver);
@@ -131,10 +138,10 @@ TEST(client_tls, http_with_ca_cert) {
         photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
         DEFER(photon::fini());
 
-        // Client: separate TLSContext, load server's cert as CA
+        // Client: separate TLSContext, load server's CA
         auto client_ctx = net::new_tls_context();
         DEFER(delete client_ctx);
-        if (client_ctx->set_ca_cert(cert_str) != 0) {
+        if (client_ctx->set_ca_cert(chain.ca_pem.c_str()) != 0) {
             sem.signal(1);
             return;
         }
@@ -161,11 +168,12 @@ TEST(client_tls, http_with_ca_cert) {
     EXPECT_EQ("test", test_handle);
 }
 
-// Verify HTTP clients with different CA configs are isolated across OS threads.
-// Each client runs in its own std::thread to get an independent PooledDialer,
-// avoiding use-after-free on the thread_local dialer's cached TLS context.
+// Exercise clients with different CA configurations on separate runtimes. The
+// same-vCPU case below separately checks per-client pool/TLS isolation.
 TEST(client_tls, http_client_cross_thread_isolation) {
-    auto server_ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    // Reached over https://127.0.0.1, so the certificate needs IP:127.0.0.1.
+    auto chain = generate_ca_signed_cert({"DNS:localhost", "IP:127.0.0.1"}, "localhost");
+    auto server_ctx = net::new_tls_context(chain.cert_pem.c_str(), chain.key_pem.c_str(), nullptr);
     DEFER(delete server_ctx);
     auto tcpserver = net::new_tls_server(server_ctx, net::new_tcp_socket_server(), true);
     DEFER(delete tcpserver);
@@ -181,7 +189,7 @@ TEST(client_tls, http_client_cross_thread_isolation) {
 
     auto port = tcpserver->getsockname().port;
 
-    // Client A with correct CA (separate thread for fresh PooledDialer)
+    // Client A with correct CA on its own runtime.
     int thread_a_result = -1;
     int thread_a_status = 0;
     photon::semaphore sem_a;
@@ -191,7 +199,7 @@ TEST(client_tls, http_client_cross_thread_isolation) {
 
         auto ctx_a = net::new_tls_context();
         DEFER(delete ctx_a);
-        ctx_a->set_ca_cert(cert_str);
+        ctx_a->set_ca_cert(chain.ca_pem.c_str());
         auto client_a = net::http::new_http_client(nullptr, ctx_a);
         DEFER(delete client_a);
 
@@ -209,7 +217,7 @@ TEST(client_tls, http_client_cross_thread_isolation) {
     ASSERT_EQ(0, thread_a_result);
     EXPECT_EQ(200, thread_a_status);
 
-    // Client B with wrong CA (separate thread)
+    // Client B with wrong CA on a separate runtime.
     auto wrong_ca_pem = generate_different_self_signed_cert();
     int thread_b_result = 0;
     photon::semaphore sem_b;
@@ -233,6 +241,130 @@ TEST(client_tls, http_client_cross_thread_isolation) {
     tb.detach();
     sem_b.wait(1);
     EXPECT_NE(0, thread_b_result);
+}
+
+TEST(client_tls, http_clients_with_different_cas_are_isolated_on_one_vcpu) {
+    auto chain = generate_ca_signed_cert({"IP:127.0.0.1"}, "localhost");
+    auto serverCtx = net::new_tls_context(chain.cert_pem.c_str(), chain.key_pem.c_str(), nullptr);
+    DEFER(delete serverCtx);
+    auto tcpServer = net::new_tls_server(serverCtx, net::new_tcp_socket_server(), true);
+    DEFER(delete tcpServer);
+    tcpServer->timeout(1'000'000);
+    ASSERT_EQ(0, tcpServer->bind_v4localhost());
+    ASSERT_EQ(0, tcpServer->listen());
+    auto server = net::http::new_http_server();
+    DEFER(delete server);
+    server->add_handler({nullptr, &idiot_handler});
+    tcpServer->set_handler(server->get_connection_handler());
+    ASSERT_EQ(0, tcpServer->start_loop());
+    auto url = estring().appends("https://127.0.0.1:", tcpServer->getsockname().port, "/test");
+    auto wrongCa = generate_different_self_signed_cert();
+    photon::semaphore done;
+    std::thread worker([&] {
+        DEFER(done.signal(1));
+        ASSERT_EQ(0, photon::init(INIT_EVENT_DEFAULT, INIT_IO_NONE));
+        DEFER(photon::fini());
+        auto goodCtx = net::new_tls_context();
+        DEFER(delete goodCtx);
+        auto badCtx = net::new_tls_context();
+        DEFER(delete badCtx);
+        ASSERT_EQ(0, goodCtx->set_ca_cert(chain.ca_pem.c_str()));
+        ASSERT_EQ(0, badCtx->set_ca_cert(wrongCa.c_str()));
+        auto good = net::http::new_http_client(nullptr, goodCtx);
+        DEFER(delete good);
+        auto bad = net::http::new_http_client(nullptr, badCtx);
+        DEFER(delete bad);
+        auto call = [&](net::http::Client* client, bool accepted) {
+            auto op = client->new_operation(net::http::Verb::GET, url);
+            DEFER(client->destroy_operation(op));
+            op->retry = 0;
+            op->timeout = 3'000'000;
+            op->req.headers.range(0, 19);
+            if (accepted) {
+                ASSERT_EQ(0, op->call());
+                EXPECT_EQ(200, op->resp.status_code());
+                char body[20];
+                EXPECT_EQ(20, op->resp.read(body, sizeof(body)));
+            } else {
+                EXPECT_NE(0, op->call());
+            }
+        };
+        call(good, true);
+        call(bad, false);   // would reuse the first client's CA under a shared dialer
+        call(good, true);
+    });
+    EXPECT_EQ(0, done.wait(1, 10'000'000));
+    worker.join();
+}
+
+// The connection pool must not let one hostname's verified connection serve a
+// request for another. The certificate covers DNS:localhost only, so the second
+// request must fail even though it reaches the same IP and port; keyed on the
+// endpoint alone, it would reuse the first connection and wrongly succeed.
+TEST(client_tls, pool_does_not_reuse_across_hostnames) {
+    auto chain = generate_ca_signed_cert({"DNS:localhost"}, "localhost");
+    auto server_ctx = net::new_tls_context(chain.cert_pem.c_str(), chain.key_pem.c_str(), nullptr);
+    DEFER(delete server_ctx);
+    auto tcpserver = net::new_tls_server(server_ctx, net::new_tcp_socket_server(), true);
+    DEFER(delete tcpserver);
+    tcpserver->timeout(1000UL * 1000);
+    ASSERT_EQ(0, tcpserver->bind_v4localhost());
+    tcpserver->listen();
+
+    auto server = net::http::new_http_server();
+    DEFER(delete server);
+    server->add_handler({nullptr, &idiot_handler});
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+
+    auto port = tcpserver->getsockname().port;
+    int by_name_result = -1, by_ip_result = 0;
+    photon::semaphore sem;
+
+    std::thread t([&, port] {
+        photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+        DEFER(photon::fini());
+
+        auto ctx = net::new_tls_context();
+        DEFER(delete ctx);
+        ctx->set_ca_cert(chain.ca_pem.c_str());
+        auto client = net::http::new_http_client(nullptr, ctx);
+        DEFER(delete client);
+
+        char buf[4096];
+        {
+            auto by_name = estring().appends("https://localhost:", port, "/test");
+            auto op1 = client->new_operation(net::http::Verb::GET, by_name);
+            DEFER(client->destroy_operation(op1));
+            op1->req.headers.range(0, 19);
+            // Retries are left enabled here: "localhost" may resolve to ::1 on
+            // hosts whose /etc/hosts lists it first, while the server binds IPv4
+            // only, and the dialer discards a failed address so the next attempt
+            // reaches 127.0.0.1. The second request below is the one that must
+            // fail, and it is pinned to a single attempt.
+            by_name_result = op1->call();
+            // Drain the body and end the operation, so the connection goes back
+            // to the pool idle rather than being dropped. Without this the
+            // second request dials afresh and the reuse path is never taken,
+            // leaving the test passing while checking nothing.
+            EXPECT_EQ(20, op1->resp.read(buf, 20));
+        }
+
+        // Same endpoint, different name: must not ride on the pooled connection
+        // that was verified for localhost.
+        auto by_ip = estring().appends("https://127.0.0.1:", port, "/test");
+        auto op2 = client->new_operation(net::http::Verb::GET, by_ip);
+        DEFER(client->destroy_operation(op2));
+        op2->req.headers.range(0, 19);
+        op2->retry = 0;
+        by_ip_result = op2->call();
+        sem.signal(1);
+    });
+    t.detach();
+    sem.wait(1);
+
+    EXPECT_EQ(0, by_name_result);
+    EXPECT_NE(0, by_ip_result);
 }
 
 int main(int argc, char** arg) {

@@ -15,11 +15,16 @@ limitations under the License.
 */
 
 #include <sys/time.h>
+#include <sys/eventfd.h>
+#include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <unordered_map>
 #include <gflags/gflags.h>
 #include <photon/io/fd-events.h>
+#include <photon/common/utility.h>
+#include <photon/common/alog-stdstring.h>
 #include <photon/io/signal.h>
 #include <photon/fs/localfs.h>
 #include <photon/fs/filesystem.h>
@@ -32,6 +37,14 @@ limitations under the License.
 #include <photon/photon.h>
 #include "../../test/gtest.h"
 #include "../../test/ci-tools.h"
+
+#ifdef PHOTON_URING
+// Compile only the internal engine in this translation unit. Its anonymous
+// namespace keeps the test copy separate from the engine in libphoton.
+#define PHOTON_IOURING_TEST_ENGINE_ONLY
+#include "../iouring-wrapper.cpp"
+#undef PHOTON_IOURING_TEST_ENGINE_ONLY
+#endif
 
 using namespace photon;
 
@@ -609,6 +622,484 @@ TEST_F(event_engine, cascading_one_shot) {
 
     photon::thread_join((photon::join_handle*) sub);
 }
+
+// iouring_uring_cmd's cmd_len bound is the only thing standing between a caller
+// and memcpy'ing past sqe->cmd into the NEXT sqe slot, which io_uring_submit then
+// hands to the kernel as an unrelated operation. sqe_cmd_capacity() is
+// sizeof(io_uring_sqe) - offsetof(io_uring_sqe, cmd) = 64 - 48 = 16 on a default
+// ring and 80 on an SQE128 one; ublk's control plane uses the latter and so
+// exercises the ACCEPTING side on every command it sends. Nothing exercised the
+// rejecting side, so pin it from both directions on the master ring.
+//
+// The discriminator has to be errno, not the return value -- both paths return -1.
+// An eventfd has no ->uring_cmd, so a command that clears the bound is submitted
+// and comes back EOPNOTSUPP from io_uring_cmd(); one stopped by the bound never
+// reaches the ring at all and reports EINVAL. An off-by-one in either direction
+// flips a case.
+//
+// Gated on PHOTON_URING: iouring_uring_cmd is declared unconditionally in
+// iouring-wrapper.h but defined only when io/iouring-wrapper.cpp is compiled, so
+// these are the only tests in the file that would not link without it.
+#ifdef PHOTON_URING
+TEST(uring_cmd, cmd_len_bound) {
+    ASSERT_EQ(0, photon::init(INIT_EVENT_IOURING, INIT_IO_NONE));
+    DEFER(photon::fini());
+
+    // A null cascading engine makes iouring_uring_cmd cast this vcpu's master
+    // engine to the iouring one without asking, so the calls below are only safe
+    // when io_uring is what actually got installed -- and asking for it is not
+    // the same as getting it: ci-tools rewrites the event-engine bits of every
+    // photon::init() from PHOTON_CI_EV_ENGINE, so a CI step that selects another
+    // engine leaves this process a master engine with no ring behind it. Ask the
+    // engine to name itself rather than trusting the flag we passed.
+    // Notice-and-return rather than GTEST_SKIP, which the gtest a host finds may
+    // predate (see test-iouring-uaf.cpp).
+    auto installed = photon::get_vcpu()->master_event_engine->get_engine_name();
+    if (installed != "iouring")
+        LOG_ERROR_RETURN(0, , "uring_cmd needs the io_uring event engine, this vcpu has `", installed);
+
+    int fd = eventfd(0, EFD_CLOEXEC);
+    ASSERT_GE(fd, 0);
+    DEFER(close(fd));
+
+    uint8_t cmd[128] = {};
+    errno = 0;
+    EXPECT_EQ(-1, iouring_uring_cmd(fd, 0, cmd, 16, {}, nullptr));
+    EXPECT_EQ(EOPNOTSUPP, errno);
+    errno = 0;
+    EXPECT_EQ(-1, iouring_uring_cmd(fd, 0, cmd, 17, {}, nullptr));
+    EXPECT_EQ(EINVAL, errno);
+}
+
+// Drives every iouring_* entry point that reaches a ring through get_ring, and
+// expects each to refuse. Nothing it passes is ever touched: get_ring identifies
+// the engine before any prep function runs, which is what lets one list cover all
+// of them with a dead fd and a path that does not exist -- each of which would also
+// fail on its own, differently, if it were ever reached.
+//
+// errno is the discriminator, and it has to be ENOSYS for the assertion to differ
+// from a refusal reached some other way. With the check taken out, the calls still
+// return -1 in places: iouring_register_files() answers EINVAL for fd < 0 and again
+// EINVAL when the kernel has no fixed-file table, and neither needs the ring, so it
+// reports a clean-looking failure through a pointer that was never an iouringEngine.
+// ENOSYS is what only get_ring's refusal produces.
+static void expect_entry_points_refuse(CascadingEventEngine* cee, const char* phase) {
+    int fd = -1;
+    char buf[16] = {};
+    iovec iov{buf, sizeof(buf)};
+    msghdr msg{};
+    sockaddr_storage addr{};
+    socklen_t addrlen = sizeof(addr);
+    uint8_t cmd[16] = {};
+
+    auto refused = [&](const char* name, int64_t ret) {
+        int err = errno;    // before EXPECT_EQ's own machinery can disturb it
+        EXPECT_EQ(-1, ret) << name << " must refuse, " << phase;
+        EXPECT_EQ(ENOSYS, err) << name << " must report ENOSYS, " << phase;
+    };
+
+    refused("iouring_splice",           iouring_splice(fd, 0, fd, 0, 0, 0, {}, cee));
+    refused("iouring_pread",            iouring_pread(fd, buf, sizeof(buf), 0, 0, {}, cee));
+    refused("iouring_pwrite",           iouring_pwrite(fd, buf, sizeof(buf), 0, 0, {}, cee));
+    refused("iouring_preadv",           iouring_preadv(fd, &iov, 1, 0, 0, {}, cee));
+    refused("iouring_pwritev",          iouring_pwritev(fd, &iov, 1, 0, 0, {}, cee));
+    refused("iouring_send",             iouring_send(fd, buf, sizeof(buf), 0, {}, cee));
+    refused("iouring_send_zc",          iouring_send_zc(fd, buf, sizeof(buf), 0, {}, cee));
+    refused("iouring_sendmsg",          iouring_sendmsg(fd, &msg, 0, {}, cee));
+    refused("iouring_sendmsg_zc",       iouring_sendmsg_zc(fd, &msg, 0, {}, cee));
+    refused("iouring_recv",             iouring_recv(fd, buf, sizeof(buf), 0, {}, cee));
+    refused("iouring_recvmsg",          iouring_recvmsg(fd, &msg, 0, {}, cee));
+    refused("iouring_connect",          iouring_connect(fd, (sockaddr*) &addr, addrlen, {}, cee));
+    refused("iouring_accept",           iouring_accept(fd, (sockaddr*) &addr, &addrlen, {}, cee));
+    refused("iouring_fsync",            iouring_fsync(fd, {}, cee));
+    refused("iouring_fdatasync",        iouring_fdatasync(fd, {}, cee));
+    refused("iouring_open",             iouring_open("/nonexistent", 0, 0, {}, cee));
+    refused("iouring_mkdir",            iouring_mkdir("/nonexistent", 0, {}, cee));
+    refused("iouring_close",            iouring_close(fd, {}, cee));
+    refused("iouring_uring_cmd",        iouring_uring_cmd(fd, 0, cmd, sizeof(cmd), {}, cee));
+    refused("iouring_register_files",   iouring_register_files(fd, cee));
+    refused("iouring_unregister_files", iouring_unregister_files(fd, cee));
+}
+
+// get_ring used to static_cast whatever engine it was handed to iouringEngine and
+// dereference the result. With a master engine that is not io_uring, that reads
+// another class's fields at this class's offsets, so every iouring_* entry point
+// faults instead of failing -- which is how CI's `Test epoll_ng` step lost this
+// whole binary to a SegFault.
+//
+// Pinning it needs a master engine that is definitely not io_uring, and asking
+// init() for one is not how to get one: ci-tools rewrites the event-engine bits of
+// every photon::init() from PHOTON_CI_EV_ENGINE (test/ci-tools.cpp), so a test that
+// inits with INIT_EVENT_EPOLL quietly runs on io_uring under the `Test io_uring`
+// step and never reaches the path it claims to. Two moves make this the same under
+// all four steps, with no skip gate needed: INIT_EVENT_NONE is the one request
+// ci-tools leaves alone (it rewrites only when the argument names an engine), and the
+// master engine is then installed past init(), where the override cannot follow.
+// That also covers all three of get_ring's rejections -- no engine at all, a
+// different master engine, and a cascading engine of the wrong kind.
+TEST(wrong_engine, entry_points_refuse) {
+    // Phase 1: no engine installed, i.e. the empty name. As unusable as the wrong
+    // one -- there is no ring either way -- and get_ring refuses it too.
+    ASSERT_EQ(0, photon::init(INIT_EVENT_NONE, INIT_IO_NONE));
+    DEFER(photon::fini());
+
+    auto installed = photon::get_vcpu()->master_event_engine->get_engine_name();
+    LOG_INFO("phase 1 master event engine: '`'", installed);
+    ASSERT_TRUE(installed.empty());
+    expect_entry_points_refuse(nullptr, "no master event engine installed");
+
+    // Phase 2: a real master engine of the wrong kind. This is the case CI hit.
+    ASSERT_EQ(0, photon::fd_events_init(photon::new_epoll_master_engine()));
+    installed = photon::get_vcpu()->master_event_engine->get_engine_name();
+    LOG_INFO("phase 2 master event engine: '`'", installed);
+    ASSERT_TRUE(installed == "epoll");
+    expect_entry_points_refuse(nullptr, "master event engine is epoll");
+
+    // Phase 3: get_ring's other arm -- a cascading engine passed explicitly, the way
+    // blk's ublk and the fuse iouring session loop pass theirs.
+    auto* cee = photon::new_epoll_cascading_engine();
+    ASSERT_NE(cee, nullptr);
+    DEFER(delete cee);
+    expect_entry_points_refuse(cee, "cascading engine is epoll");
+
+    // iouring_abandon is the 22nd: the one entry point whose contract demands a
+    // non-null cascading engine, so only this phase can exercise it. It returns
+    // void, leaving errno as the thing to assert on.
+    errno = 0;
+    iouring_abandon(cee);
+    int err = errno;
+    EXPECT_EQ(ENOSYS, err);
+}
+
+// Reap one CQE per batch to exercise every completion order deterministically.
+namespace {
+
+struct CompletionRing {
+    static constexpr unsigned CAPACITY = 8;
+    photon::iouringEngine engine;
+    io_uring ring{};
+    io_uring_sqe sqes[CAPACITY]{};
+    io_uring_cqe cqes[CAPACITY]{};
+    unsigned sqHead = 0, cqHead = 0, cqTail = 0;
+
+    CompletionRing() {
+        ring.sq.khead = &sqHead;
+        ring.sq.ring_mask = CAPACITY - 1;
+        ring.sq.ring_entries = CAPACITY;
+        ring.sq.sqes = sqes;
+        ring.cq.khead = &cqHead;
+        ring.cq.ktail = &cqTail;
+        ring.cq.ring_mask = CAPACITY - 1;
+        ring.cq.ring_entries = CAPACITY;
+        ring.cq.cqes = cqes;
+        engine.m_ring = &ring;
+    }
+
+    ~CompletionRing() {
+        // The memory ring is owned by this fixture, not by liburing.
+        engine.m_ring = nullptr;
+    }
+
+    void complete(unsigned sqeIndex, int result) {
+        auto& cqe = cqes[cqTail & (CAPACITY - 1)];
+        cqe = {};
+        cqe.user_data = sqes[sqeIndex].user_data;
+        cqe.res = result;
+        ++cqTail;
+        EXPECT_EQ(0, engine.reap_events());
+        photon::thread_yield();
+    }
+};
+
+TEST(iouring_completion, timeout_queue_full_neutralizes_io_sqe) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    CompletionRing fixture;
+    for (unsigned i = 0; i + 1 < CompletionRing::CAPACITY; ++i) {
+        auto sqe = fixture.engine._get_sqe();
+        ASSERT_NE(nullptr, sqe);
+        io_uring_prep_nop(sqe);
+        io_uring_sqe_set_data(sqe, nullptr);
+    }
+    auto sqe = fixture.engine._get_sqe();
+    ASSERT_NE(nullptr, sqe);
+    io_uring_prep_openat(sqe, AT_FDCWD, "/dev/null", O_CLOEXEC, 0);
+    auto result = fixture.engine._async_io(sqe, 1000000, IOSQE_ASYNC);
+    auto error = errno;
+    EXPECT_EQ(-1, result);
+    EXPECT_EQ(EBUSY, error);
+    EXPECT_EQ(unsigned(CompletionRing::CAPACITY), fixture.ring.sq.sqe_tail);
+    // The reserved entry will still be submitted, but it must neither retain
+    // operation-specific flags nor link the next request to this failed call.
+    EXPECT_EQ(IORING_OP_NOP, sqe->opcode);
+    EXPECT_EQ(0, sqe->flags);
+    EXPECT_EQ(0U, sqe->rw_flags);
+    EXPECT_EQ(0U, sqe->user_data);
+    for (unsigned i = 0; i + 1 < CompletionRing::CAPACITY; ++i) {
+        EXPECT_EQ(IORING_OP_NOP, fixture.sqes[i].opcode);
+        EXPECT_EQ(0, fixture.sqes[i].flags);
+        EXPECT_EQ(0U, fixture.sqes[i].user_data);
+    }
+    fixture.complete(CompletionRing::CAPACITY - 1, 0);
+}
+
+static void interrupted_completion_order(const unsigned* order, unsigned count,
+                                         int ioResult, int cancelResult,
+                                         bool fullQueue = false, bool timed = true) {
+    CompletionRing fixture;
+    bool returned = false;
+    int result = 0, error = 0;
+    auto waiter = photon::thread_create11([&] {
+        auto sqe = fixture.engine._get_sqe();
+        io_uring_prep_nop(sqe);
+        auto timeout = timed ? photon::Timeout(1000000) : photon::Timeout();
+        result = fixture.engine._async_io(sqe, timeout, 0);
+        error = errno;
+        returned = true;
+    });
+    auto join = photon::thread_enable_join(waiter);
+    photon::thread_yield();
+    EXPECT_EQ(timed ? 2U : 1U, fixture.ring.sq.sqe_tail);
+    if (fullQueue)
+        fixture.ring.sq.sqe_tail = CompletionRing::CAPACITY;
+
+    photon::thread_interrupt(waiter, EINTR);
+    photon::thread_yield(); // enter the cancellation drain
+    EXPECT_FALSE(returned);
+    if (!fullQueue) {
+        EXPECT_EQ(timed ? 3U : 2U, fixture.ring.sq.sqe_tail); // async cancel
+    }
+
+    for (unsigned i = 0; i < count; ++i) {
+        auto index = order[i];
+        unsigned cancelIndex = timed ? 2 : 1;
+        int res = index == 0 ? ioResult : (index == cancelIndex ? cancelResult : -ECANCELED);
+        fixture.complete(index, res);
+        if (i + 1 < count) {
+            EXPECT_FALSE(returned); // stack contexts must stay alive
+            // A second external interruption must not end the drain early.
+            photon::thread_interrupt(waiter, ESHUTDOWN);
+            photon::thread_yield();
+            EXPECT_FALSE(returned);
+        }
+    }
+    EXPECT_TRUE(returned) << "final CQE left the cancellation drain asleep";
+    if (!returned) {
+        // All CQEs are consumed, so an extra wake can safely rescue a broken
+        // implementation and let the test report failure instead of hanging.
+        photon::thread_interrupt(waiter, EINTR);
+    }
+    photon::thread_join(join);
+    EXPECT_EQ(-1, result);
+    EXPECT_EQ(EINTR, error); // preserve the original external interruption
+}
+
+TEST(iouring_completion, interrupted_all_completion_orders) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    for (int ioResult : {1, -ECANCELED}) {
+        for (int cancelResult : {0, -ENOENT, -ECANCELED}) {
+            unsigned order[] = {0, 1, 2};
+            do {
+                SCOPED_TRACE(testing::Message() << "io=" << ioResult
+                    << " cancel=" << cancelResult << " order="
+                    << order[0] << order[1] << order[2]);
+                interrupted_completion_order(order, 3, ioResult, cancelResult);
+            } while (std::next_permutation(order, order + 3));
+        }
+    }
+}
+
+TEST(iouring_completion, untimed_completion_orders) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    for (int ioResult : {1, -ECANCELED}) {
+        for (int cancelResult : {0, -ENOENT, -ECANCELED}) {
+            unsigned order[] = {0, 1};
+            do {
+                SCOPED_TRACE(testing::Message() << "io=" << ioResult
+                    << " cancel=" << cancelResult << " order="
+                    << order[0] << order[1]);
+                interrupted_completion_order(order, 2, ioResult, cancelResult, false, false);
+            } while (std::next_permutation(order, order + 2));
+        }
+    }
+}
+
+TEST(iouring_completion, full_submission_queue_completion_orders) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    for (int ioResult : {1, -ECANCELED}) {
+        unsigned order[] = {0, 1};
+        do {
+            SCOPED_TRACE(testing::Message() << "io=" << ioResult
+                << " order=" << order[0] << order[1]);
+            interrupted_completion_order(order, 2, ioResult, 0, true);
+        } while (std::next_permutation(order, order + 2));
+    }
+}
+
+TEST(iouring_completion, normal_all_completion_orders) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    for (int ioResult : {1, -EIO, -ECANCELED}) {
+        unsigned order[] = {0, 1};
+        do {
+            SCOPED_TRACE(testing::Message() << "io=" << ioResult
+                << " order=" << order[0] << order[1]);
+            CompletionRing fixture;
+            bool returned = false;
+            int result = 0, error = 0;
+            auto waiter = photon::thread_create11([&] {
+                auto sqe = fixture.engine._get_sqe();
+                io_uring_prep_poll_add(sqe, 0, POLLIN);
+                result = fixture.engine._async_io(sqe, 1000000, 0);
+                error = errno;
+                returned = true;
+            });
+            auto join = photon::thread_enable_join(waiter);
+            photon::thread_yield();
+            int timerResult = ioResult == -ECANCELED ? -ETIME : -ECANCELED;
+            fixture.complete(order[0], order[0] == 0 ? ioResult : timerResult);
+            EXPECT_FALSE(returned);
+            // Avoid delivering a CQE to an expired stack if this regression fails
+            // with break_on_failure disabled.
+            if (!returned)
+                fixture.complete(order[1], order[1] == 0 ? ioResult : timerResult);
+            EXPECT_TRUE(returned);
+            if (!returned) photon::thread_interrupt(waiter, EOK);
+            photon::thread_join(join);
+            EXPECT_EQ(ioResult < 0 ? -1 : ioResult, result);
+            if (ioResult < 0) {
+                EXPECT_EQ(ioResult == -ECANCELED ? ETIMEDOUT : EIO, error);
+            }
+        } while (std::next_permutation(order, order + 2));
+    }
+}
+
+TEST(iouring_completion, interrupted_after_partial_normal_completion) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    for (int ioResult : {1, -EIO, -ECANCELED}) {
+        for (unsigned first : {0U, 1U}) {
+            unsigned order[] = {1U - first, 2};
+            do {
+                SCOPED_TRACE(testing::Message() << "io=" << ioResult
+                    << " first=" << first << " remaining=" << order[0] << order[1]);
+                CompletionRing fixture;
+                bool returned = false;
+                int result = 0, error = 0;
+                auto waiter = photon::thread_create11([&] {
+                    auto sqe = fixture.engine._get_sqe();
+                    io_uring_prep_poll_add(sqe, 0, POLLIN);
+                    result = fixture.engine._async_io(sqe, 1000000, 0);
+                    error = errno;
+                    returned = true;
+                });
+                auto join = photon::thread_enable_join(waiter);
+                photon::thread_yield();
+                int timerResult = ioResult == -ECANCELED ? -ETIME : -ECANCELED;
+                fixture.complete(first, first == 0 ? ioResult : timerResult);
+                EXPECT_FALSE(returned);
+                if (returned) {
+                    photon::thread_join(join);
+                    continue; // do not deliver CQEs to expired stack contexts
+                }
+                photon::thread_interrupt(waiter, EINTR);
+                photon::thread_yield();
+                EXPECT_EQ(3U, fixture.ring.sq.sqe_tail);
+                EXPECT_FALSE(returned);
+                for (unsigned index : order) {
+                    fixture.complete(index, index == 0 ? ioResult :
+                        (index == 1 ? timerResult : -ENOENT));
+                    if (index == order[0]) {
+                        EXPECT_FALSE(returned);
+                        photon::thread_interrupt(waiter, ESHUTDOWN);
+                        photon::thread_yield();
+                        EXPECT_FALSE(returned);
+                    }
+                }
+                EXPECT_TRUE(returned);
+                if (!returned) photon::thread_interrupt(waiter, EOK);
+                photon::thread_join(join);
+                EXPECT_EQ(-1, result);
+                EXPECT_EQ(EINTR, error);
+            } while (std::next_permutation(order, order + 2));
+        }
+    }
+}
+
+TEST(iouring_completion, normal_untimed_completion) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    for (int ioResult : {1, -EIO}) {
+        CompletionRing fixture;
+        bool returned = false;
+        int result = 0, error = 0;
+        auto waiter = photon::thread_create11([&] {
+            auto sqe = fixture.engine._get_sqe();
+            io_uring_prep_poll_add(sqe, 0, POLLIN);
+            result = fixture.engine._async_io(sqe, photon::Timeout(), 0);
+            error = errno;
+            returned = true;
+        });
+        auto join = photon::thread_enable_join(waiter);
+        photon::thread_yield();
+        EXPECT_EQ(1U, fixture.ring.sq.sqe_tail);
+        fixture.complete(0, ioResult);
+        EXPECT_TRUE(returned);
+        if (!returned) photon::thread_interrupt(waiter, EOK);
+        photon::thread_join(join);
+        EXPECT_EQ(ioResult < 0 ? -1 : ioResult, result);
+        if (ioResult < 0) {
+            EXPECT_EQ(EIO, error);
+        }
+    }
+}
+
+TEST(iouring_completion, eager_normal_completion_on_kernel_ring) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    photon::iouringEngine engine;
+    photon::iouring_args args;
+    args.is_master = false;
+    args.eager_submit = true;
+    ASSERT_EQ(0, engine.init(args));
+    bool stop = false;
+    auto pump = photon::thread_create11([&] {
+        void* data[1];
+        while (!stop)
+            engine.wait_for_events(data, 1, 1000);
+    });
+    ASSERT_NE(nullptr, pump);
+    auto join = photon::thread_enable_join(pump);
+    DEFER({
+        stop = true;
+        photon::thread_interrupt(pump);
+        photon::thread_join(join);
+    });
+    int fds[2];
+    ASSERT_EQ(0, ::pipe(fds));
+    DEFER({ ::close(fds[0]); ::close(fds[1]); });
+    char buf = 0;
+    for (int i = 0; i < 32; ++i) {
+        int result = engine.async_io(&io_uring_prep_poll_add, 1000, 0, fds[0], POLLIN);
+        int error = errno;
+        ASSERT_EQ(-1, result);
+        ASSERT_EQ(ETIMEDOUT, error);
+        ASSERT_EQ(1, ::write(fds[1], &buf, 1));
+        ASSERT_GT(engine.async_io(&io_uring_prep_poll_add, 1000000, 0, fds[0], POLLIN), 0);
+        ASSERT_EQ(1, ::read(fds[0], &buf, 1));
+        result = engine.async_io(&io_uring_prep_read, 1000000, 0, -1, &buf, 1, 0);
+        error = errno;
+        ASSERT_EQ(-1, result);
+        ASSERT_EQ(EBADF, error);
+    }
+}
+
+} // namespace
+
+#endif
 
 int main(int argc, char** arg) {
     srand(time(nullptr));

@@ -64,7 +64,9 @@ public:
     virtual ssize_t pread(void *buf, size_t count, off_t offset) override {
         if (count != EXT_BLOCK_SIZE || (offset & EXT_BLOCK_SIZE_MOD)) {
             disk_read += count;
-            return m_file->pread(buf, count, offset);
+            auto ret = m_file->pread(buf, count, offset);
+            if (ret > 0) sync_buffered_range(buf, ret, offset, false);
+            return ret;
         }
         ListNode *x = get_buffer_block(DIV(offset));
         if (!x) {
@@ -77,6 +79,9 @@ public:
     virtual ssize_t pwrite(const void *buf, size_t count, off_t offset) override {
         if (count != EXT_BLOCK_SIZE || (offset & EXT_BLOCK_SIZE_MOD)) {
             disk_write += count;
+            // patch the buffered copy first, otherwise flushing it later would
+            // roll this write back
+            sync_buffered_range((void*) buf, count, offset, true);
             return m_file->pwrite(buf, count, offset);
         }
         ListNode *x = get_buffer_block(DIV(offset));
@@ -125,6 +130,34 @@ private:
     };
     std::map<off_t, ListNode*> mp;
     ListNode *head, *tail;
+
+    /*
+     * Only a request that covers exactly one aligned EXT_BLOCK_SIZE block goes
+     * through the buffer, everything else is passed straight to the device. The
+     * ext4 superblock is such an exception: it is 1KB at offset 1024, so it
+     * always bypasses the buffer, while the group descriptors sharing its
+     * buffer block do not. Reconcile the two copies whenever a bypassing range
+     * overlaps a buffered block: a write patches the buffered copy, so that
+     * flushing it will not undo the write, and a read takes the buffered copy,
+     * which is never older than the device.
+     */
+    void sync_buffered_range(void *buf, size_t count, off_t offset, bool is_write) {
+        if (mp.empty() || count == 0) return;
+        for (off_t id = DIV(offset), last = DIV(offset + count - 1); id <= last; id++) {
+            auto it = mp.find(id);
+            if (it == mp.end()) continue;
+            off_t block_begin = MULT(id);
+            off_t begin = std::max(offset, block_begin);
+            off_t end = std::min((off_t)(offset + count), block_begin + (off_t)block_size);
+            char *buffered = buffer + pos(it->second->buffer_block_id, begin - block_begin);
+            char *raw = (char*) buf + (begin - offset);
+            if (is_write) {
+                std::copy_n(raw, end - begin, buffered);
+            } else {
+                std::copy_n(buffered, end - begin, raw);
+            }
+        }
+    }
 
     ListNode *get_buffer_block(off_t block_id) {
         ListNode *x;

@@ -32,9 +32,6 @@ namespace photon {
 
 class WorkPool::impl {
 public:
-    static constexpr uint64_t QUEUE_YIELD_COUNT = 256;
-    static constexpr uint64_t QUEUE_YIELD_US = 1024;
-
     using FlexRing = FlexLockfreeMPMCRingQueue<Delegate<void>>;
     using FlexRingChannel = common::FlexRingChannel<FlexRing>;
 
@@ -45,10 +42,11 @@ public:
     FlexRingChannel* ring;
     int mode;
 
-    impl(size_t vcpu_num, int ev_engine, int io_engine, int mode, size_t ring_size)
+    impl(size_t vcpu_num, int ev_engine, int io_engine, int mode, size_t ring_size,
+         uint64_t queue_yield_count, uint64_t queue_yield_us)
         : mode(mode) {
         assert(ring_size > 0 && "workpool ring_size must be > 0");
-        ring = FlexRingChannel::create(ring_size, QUEUE_YIELD_COUNT, QUEUE_YIELD_US);
+        ring = FlexRingChannel::create(ring_size, queue_yield_count, queue_yield_us);
         if (!ring) abort();
         vcpus.reserve(vcpu_num);
         for (size_t i = 0; i < vcpu_num; ++i) {
@@ -128,8 +126,12 @@ public:
         DEFER(if (pool) delete_thread_pool(pool));
         ready_vcpu.signal(1);
         for (;;) {
-            auto yc = running_tasks ? 0 : QUEUE_YIELD_COUNT;
-            auto task = ring->recv(yc, QUEUE_YIELD_US);
+            // Spin for a bounded window (count + time) before parking, even
+            // while tasks are in flight: those tasks may be blocked on IO,
+            // leaving this vcpu free to pick up the next task with a short
+            // cooperative spin instead of paying a cross-vcpu wake-up. The
+            // window is bounded, so a genuinely idle worker still parks.
+            auto task = ring->recv();
             if (!task) break;
             running_tasks = running_tasks + 1; // ++ -- are deprecated for volatile in C++20
             TaskLB tasklb{task, &running_tasks};
@@ -203,8 +205,10 @@ private:
     StdSemaphore ready_vcpu;
 };
 
-WorkPool::WorkPool(size_t vcpu_num, int ev_engine, int io_engine, int mode, size_t ring_size)
-    : pImpl(new impl(vcpu_num, ev_engine, io_engine, mode, ring_size)) {}
+WorkPool::WorkPool(size_t vcpu_num, int ev_engine, int io_engine, int mode, size_t ring_size,
+                   uint64_t queue_yield_count, uint64_t queue_yield_us)
+    : pImpl(new impl(vcpu_num, ev_engine, io_engine, mode, ring_size, queue_yield_count,
+                     queue_yield_us)) {}
 
 WorkPool::~WorkPool() { /* implicitly delete pImpl */}
 

@@ -34,6 +34,7 @@ inline int NodeImpl::init_non_root(str key, str value,
     _root = root;
     assert(root);
     _flags = flags & ~FLAG_IS_ROOT;
+    _nchildren = 0;
 
     assert(key.length() <= MAX_KEY_LENGTH);
     assert(value.length() <= MAX_VALUE_LENGTH);
@@ -81,6 +82,7 @@ inline int NodeImpl::init_root(const char* text_begin,
     assert(node_size <= MAX_NODE_SIZE);
     _node_size = node_size;
     _refcnt = 0;
+    _nchildren = 0;
     return 0;
 }
 
@@ -173,11 +175,36 @@ public:
     using DocNode::DocNode;
 };
 
+// GenericInsituStringStream requires the text to be null-terminated,
+// which is not guaranteed here, so we bound it with an end pointer.
+struct JStream : public GenericInsituStringStream<UTF8<>> {
+    const Ch* _end;
+    JStream(Ch* begin, const Ch* end) :
+        GenericInsituStringStream(begin), _end(end) { }
+    Ch Peek() const { return (src_ < _end) ? *src_ : '\0'; }
+    Ch Take() { return (src_ < _end) ? *src_++ : '\0'; }
+};
+
+} // namespace SimpleDOM
+} // namespace photon
+
+// Same as GenericInsituStringStream, which the reader relies on to
+// locate in-situ raw numbers.
+namespace rapidjson {
+template<> struct StreamTraits<photon::SimpleDOM::JStream> {
+    enum { copyOptimization = 1 };
+};
+}
+
+namespace photon {
+namespace SimpleDOM {
+
 struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     vector<vector<JNode>> _nodes{1};
     str _key;
     JNode* _root;
-    JHandler(const char* text) {
+    const JStream* _stream;
+    JHandler(const char* text, const JStream* stream) : _stream(stream) {
         assert(_nodes.size() == 1);
         _root = new JNode(text, false);
     }
@@ -218,9 +245,11 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
         emplace_back(s, len, JNode::NUMBER);
         return true;
     }
-    bool RawBool(const Ch* s, SizeType len, bool copy) {
-        assert(!copy);
-        emplace_back(s, len, JNode::BOOLEAN);
+    bool Bool(bool b) {
+        // The reader has just consumed the literal `true` or `false` from
+        // the stream (no local copy is made for it), so it ends at `src_`.
+        SizeType len = b ? 4 : 5;
+        emplace_back(_stream->src_ - len, len, JNode::BOOLEAN);
         return true;
     }
     bool StartObject() {
@@ -251,41 +280,39 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     }
 };
 
-// As some parsers don't support text length, they only support null
-// terminated strings, so we have to convert the last trailer to '\0',
-// while making the parser to treat it as the trailer.
-static bool fix_trail(estring_view text, char header, char trailer) {
+// As the text is not guaranteed to be null-terminated, we locate the
+// last trailer (followed by white spaces only) to bound the parsers.
+static char* find_trail(estring_view text, char header, char trailer) {
     auto i = text.rfind(trailer);
     if (i == estring_view::npos)
-        LOG_ERROR_RETURN(EINVAL, false, "no trailer found");
+        LOG_ERROR_RETURN(EINVAL, nullptr, "no trailer found");
     for (char c: text.substr(i+1))
         if (!isspace(c))
-            LOG_ERROR_RETURN(EINVAL, false, "illegal character after trailer");
+            LOG_ERROR_RETURN(EINVAL, nullptr, "illegal character after trailer");
     size_t k = 0;
     for (char c: text.substr(0, i+1)) {
         if (!c)
-            LOG_ERROR_RETURN(EINVAL, false, "unexpected '\\0'");
+            LOG_ERROR_RETURN(EINVAL, nullptr, "unexpected '\\0'");
         if (c == header) ++k;
         else if (c == trailer)
                 if (k-- == 0) goto failed;
     }
     if (k != 0) failed:
-        LOG_ERROR_RETURN(EINVAL, false, "unbalanced header/trailer");
-    auto c = &text[i];
-    *(char*)c = '\0';
-    return true;
+        LOG_ERROR_RETURN(EINVAL, nullptr, "unbalanced header/trailer");
+    return (char*)&text[i];
 }
 
 static NodeImpl* parse_json(char* text, size_t size, int flags) {
     // without kParseStopWhenDoneFlag, rapidjson will expect the last character of
     // the JSON string to be '\0'.
-    const auto kFlags = kParseNumbersAsStringsFlag | kParseBoolsAsStringFlag |
+    const auto kFlags = kParseNumbersAsStringsFlag |
                         kParseInsituFlag | kParseCommentsFlag |
                         kParseTrailingCommasFlag | kParseStopWhenDoneFlag;
-    if (!fix_trail({text, size}, '{', '}')) return nullptr;
-    JHandler h(text);
+    auto trail = find_trail({text, size}, '{', '}');
+    if (!trail) return nullptr;
+    JStream s(text, trail + 1);
+    JHandler h(text, &s);
     using Encoding = UTF8<>;
-    GenericInsituStringStream<Encoding> s(text);
     GenericReader<Encoding, Encoding> reader;
     auto res = reader.Parse<kFlags>(s, h);
     if (!res) {
@@ -339,7 +366,20 @@ public:
 };
 
 static NodeImpl* parse_xml(char* text, size_t size, int flags) {
-    if (!fix_trail({text, size}, '<', '>')) return nullptr;
+    auto trail = find_trail({text, size}, '<', '>');
+    if (!trail) return nullptr;
+    // rapidxml requires the text to be null-terminated, so we shift the '>'
+    // of the root's closing tag left by one char, overwriting the last char
+    // of the tag name (or a white space), and put the '\0' in its place.
+    // This is safe as closing tag names are not validated by rapidxml
+    // without parse_validate_closing_tags.
+    estring_view head(text, trail - text);
+    auto i = head.rfind("</");
+    if (i == estring_view::npos || i + 2 >= head.size() ||
+        head.substr(i + 2).find_first_of(charset("<>")) != estring_view::npos)
+        LOG_ERROR_RETURN(EINVAL, nullptr, "the last tag is not a closing tag with name");
+    trail[-1] = '>';
+    trail[0] = '\0';
     xml_document<char> doc;
     doc.parse<0>(text);
     auto root = make_unique<XMLNode>(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);

@@ -44,7 +44,7 @@ toc_max_heading_level: 4
 - 三种格式共享同一棵树形表示。
 - `SimpleDOM::Document` 从缓冲区解析，通过路径式查询访问节点。
 - 适合配置解析和较小的响应体，不适合大型流式文档。
-- `rapidjson` 和 `rapidxml`（作为后端使用）的补丁保存在 `ecosystem/patches/`。
+- `rapidjson` 和 `rapidxml`（作为后端使用）以原版形式使用，不打任何补丁。
 
 源码：`ecosystem/simple_dom.h`、`ecosystem/simple_dom.cpp`、`ecosystem/simple_dom_impl.h`。
 

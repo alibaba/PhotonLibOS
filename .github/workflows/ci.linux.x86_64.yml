@@ -1,21 +1,21 @@
 name: Linux x86_64
 
-# Runs triggered by removing an irrelevant label would have all jobs skipped, but they
-# still enter the concurrency group and would cancel an in-progress CI run. Divert them
-# into a separate '-noop' group so they never interfere with real CI runs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.event.action == 'unlabeled' && github.event.label.name != 'needs-manual-merge') && '-noop' || '' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Draft PRs don't run CI. Auto-PR opens conflicted backports as drafts, whose conflict
+# markers would fail the build anyway; marking one ready for review triggers a full run
+# against a freshly computed merge ref.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [ "main", "release/*" ]
 
 jobs:
   gcc-test:
     name: gcc-${{ matrix.gcc }}
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: arc-acs-runner-set
     strategy:
       fail-fast: false
@@ -28,6 +28,11 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      # Before the build, so the run's log states what the blk suites will be able to do
+      # before anything is compiled. The script itself explains what it loads and why a
+      # missing module is not fatal.
+      - name: Load kernel modules for tcmu / ublk / vduse
+        run: sh blk/test/load-kernel-modules.sh
       - name: Build
         run: |
           uname -a
@@ -45,29 +50,29 @@ jobs:
                          -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc)
       - name: Test epoll
+        timeout-minutes: 60
         run: |
           nohup redis-server &
-          cd build && ctest --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V -E "test-blk"
           pkill redis-server
       - name: Test io_uring
+        timeout-minutes: 60
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V -E "test-blk"
           pkill redis-server
       - name: Test epoll_ng
+        timeout-minutes: 60
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V -E "test-blk"
           pkill redis-server
 
   fstack:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-26.04
-    container:
-      image: ghcr.io/alibaba/photon-ut-fstack:latest
-      options: --cpus 4 --privileged
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: photon-arc-runner-fstack
     steps:
       - uses: actions/checkout@v4
       - name: Build
@@ -78,23 +83,22 @@ jobs:
           cmake --build build -j $(nproc) -t fstack-dpdk-demo
 
   RocksDB:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-26.04
-    container:
-      image: almalinux:8
-      options: --cpus 4 --privileged
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: arc-acs-runner-set
     steps:
       - uses: actions/checkout@v4
       - name: Build
         run: |
-          export PHOTON_SRC_DIR=`pwd`
-          dnf install -q -y git gcc-c++ cmake openssl-devel libcurl-devel libaio-devel zlib-devel epel-release
-          dnf config-manager --set-enabled powertools
-          dnf install -q -y gflags-devel snappy-devel zlib-devel bzip2-devel lz4-devel libzstd-devel nasm
-          git clone -b photon-on-6.1.2 https://github.com/data-accelerator/rocksdb.git /opt/rocksdb
-          cd /opt/rocksdb
+          export PHOTON_SRC_DIR="$(pwd)"
+          sudo dnf install -q -y git gcc-c++ cmake openssl-devel libcurl-devel libaio-devel zlib-devel epel-release
+          sudo dnf config-manager --set-enabled powertools
+          sudo dnf install -q -y gflags-devel snappy-devel zlib-devel bzip2-devel lz4-devel libzstd-devel nasm
+          rocksdbBuildDir=$(mktemp -d "${RUNNER_TEMP}/rocksdb.XXXXXX")
+          trap 'rm -rf "$rocksdbBuildDir"' EXIT
+          git clone -b photon-on-6.1.2 https://github.com/data-accelerator/rocksdb.git "$rocksdbBuildDir"
+          cd "$rocksdbBuildDir"
           rm -rf third-party/PhotonLibOS
-          ln -s $PHOTON_SRC_DIR third-party/PhotonLibOS
+          ln -s "$PHOTON_SRC_DIR" third-party/PhotonLibOS
           ./photon-auto-convert.sh
           cmake -B build -D WITH_TESTS=on -D INIT_PHOTON_IN_ENV=on -D WITH_LZ4=on -D WITH_SNAPPY=on \
             -D CMAKE_BUILD_TYPE=Debug

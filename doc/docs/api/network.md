@@ -271,6 +271,45 @@ Similarly, we also encapsulated its fs in `<photon/fs/httpfs/httpfs.h>`, which i
 | `client.h` | `Client` (abstract): `call(Operation*)` with follow redirects, retry, timeout, body_writer delegate. `OperationOnStack<N>` for stack allocation. |
 | `server.h` | `HTTPServer`: `handle_connection()`, pattern-matched `add_handler()`. Built-in: `new_fs_handler()`, `new_proxy_handler()`. |
 
+For HTTP client operations, `op.req.headers` stores caller configuration. Each hop
+first selects its route and proxy authentication, then composes a separate outgoing
+message from proxy, caller, common, default and cookie headers. Caller headers take
+precedence over common headers; all occurrences of a repeated field from the chosen
+source retain their wire order. Common and default headers are not written back to
+caller configuration. Cookies are selected again for each redirect.
+
+`Proxy-Authorization` in caller or common headers is proxy configuration: it is used
+for a forwarded proxy request or CONNECT and is never sent to the origin. The
+header configuration remains available for later hops and calls. Following a redirect
+rewrites the request line, target and `Host` in `op.req`; a later call reuses that
+redirected request. A body writer still receives `&op.req` and sees the final outgoing
+headers and body framing during its callback; the caller configuration is restored
+when body transmission finishes.
+
+When a proxy is configured, an HTTP origin uses ordinary forwarding. An HTTPS origin
+uses CONNECT followed by TLS to the origin inside the tunnel; this also applies to
+OSS endpoints without a scheme and to httpfs_v2 with `default_https=true`. An HTTPS
+proxy adds a separate TLS connection to the proxy before CONNECT. A proxy used for
+HTTPS origins must support CONNECT.
+
+Concurrent calls from different vCPUs use separate Operations. Configure the client
+before use: setters and mutation through header/proxy accessors must not race calls,
+except `set_resolver()`, which supports replacement during requests. Built-in dialers
+capture bind IPs on each vCPU's first dial and do not update that vCPU's existing
+dialer. Supplied cookie jars, proxy authenticators and custom dialers must support
+concurrent access;
+`new_simple_cookie_jar()` has no cross-vCPU synchronization.
+
+Authenticator-provided `Proxy-Authorization` overrides the fallback credentials,
+including when the field is explicitly empty. Connection pool route keys include
+this effective authorization automatically. `ProxyAuth::pool_key` must distinguish
+any additional application-specific identity or route headers used to establish a
+tunnel; per-request trace headers need not prevent tunnel reuse.
+
+When space permits, the outgoing message and then the response reuse the unused
+region of the configured request buffer. Tight buffers and cookie composition use
+a separate outgoing buffer without changing the caller's header storage.
+
 ## HTTP/2
 
 Defined in `<photon/net/http/streams.h>`. Full RFC 9113 / 7541 implementation:
@@ -302,8 +341,24 @@ Defined in `<photon/net/http/streams.h>`. Full RFC 9113 / 7541 implementation:
 - `TLSContext`: cert, key, passphrase, verify mode, ALPN protos.
 - `new_tls_stream(ctx, base, role)`: wrap a socket with TLS.
 - `new_tls_client/server(ctx, base)`: factory wrappers.
-- `tls_stream_set_hostname()`: SNI.
+- `tls_stream_set_hostname()`: send SNI, and check the peer certificate against the hostname.
+- `tls_stream_set_sni()`: send SNI only, without checking the name.
 - `tls_stream_get_alpn_selected()`: negotiated ALPN protocol.
+
+#### Verifying a server's identity
+
+Two independent checks are needed, and each is useless alone:
+
+1. `set_verify_mode(VerifyMode::PEER)` — plus `set_ca_cert()` or `set_ca_file()`, which turn `PEER` on as a side effect — checks that the certificate chains up to a trusted CA. This proves the certificate is genuine, not who it belongs to.
+2. `tls_stream_set_hostname()` checks that the certificate was actually issued for the host you asked for. Without it, any certificate signed by a trusted CA is accepted, including one issued to an attacker for a domain they control.
+
+`tls_stream_set_hostname()` must be called before the first read or write, as the client handshake is deferred until then. Hostnames are matched against `dNSName` SANs and IP literals against `iPAddress` SANs, falling back to the subject common name when the certificate carries no SAN. A wildcard matches a single label, in the leftmost position only, and may not cover part of a label (`www*.example.com` is rejected).
+
+The name check is performed by OpenSSL while it verifies the chain, so it needs `VerifyMode::PEER`. Requesting a hostname on a context left at `VerifyMode::NONE` returns `-1` with `EINVAL` rather than passing silently. To send SNI without a name check, use `tls_stream_set_sni()` or `TLSContext::set_verify_hostname(false)` — the analogue of curl's `CURLOPT_SSL_VERIFYHOST`.
+
+`net::http::Client` does all of this for you: it verifies against the host in the URL, and pools TLS connections per hostname so that a connection verified for one host is never reused for another. A `TLSContext` you supply yourself starts at `VerifyMode::NONE`, which disables both checks; call `set_verify_mode(VerifyMode::PEER)` or load a CA to turn them on.
+
+The RPC `StubPool` connects by endpoint and has no hostname in its API, so it cannot perform this check; TLS there authenticates the channel, not the peer's identity.
 
 ### SASL
 

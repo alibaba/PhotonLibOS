@@ -124,6 +124,7 @@ public:
     int set_cookies_to_headers(Request* request) {
         uint64_t now = time(0);
         auto& h = request->headers;
+        if (h.find("Cookie") != h.end()) return 0;
         bool first = true;
         for (auto it = m_cookies.begin(); it != m_cookies.end(); ) {
             if (now > it->second.expire) {
@@ -138,7 +139,7 @@ public:
             size_t size = it->first.size() + 1 + it->second.value.size();
             if (first) {
                 if (h.space_remain() < size + 10+6) return -1;
-                h.insert("Cookie", "");
+                if (h.insert("Cookie", "") < 0) return -1;
                 first = false;
             } else {
                 if (h.space_remain() < size + 2+6) return -1;
