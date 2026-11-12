@@ -341,7 +341,9 @@ namespace net {
         Callback<ISocketStream*> heartbeater = { };
         uint64_t heartbeat_interval = 10'000'000;
 
-        // in-stock socket streams are deleted after `expiration` us
+        // in-stock socket streams are deleted after `expiration` us;
+        // -1ULL (default) keeps them until the peer closes them, and 0 is
+        // treated as -1ULL
         uint64_t expiration = -1ULL;
     };
 

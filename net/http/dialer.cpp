@@ -554,7 +554,8 @@ static void add_layer(std::unique_ptr<IDialer>& chain, Args&&... args) {
 }
 
 IDialer* new_http_dialer(TLSContext* context,
-                         const std::vector<IPAddr>& bind_ips) {
+                         const std::vector<IPAddr>& bind_ips,
+                         uint64_t expiration) {
     std::unique_ptr<TLSContext> owned_context;
     if (!context) {
         owned_context.reset(new_tls_context(nullptr, nullptr, nullptr));
@@ -572,7 +573,7 @@ IDialer* new_http_dialer(TLSContext* context,
                              TLSLayer::ORIGIN);
     else
         add_layer<TLSDialer>(chain, context, TLSLayer::ORIGIN);
-    add_layer<PoolDialer>(chain, -1ULL);
+    add_layer<PoolDialer>(chain, expiration);
     return chain.release();
 }
 
