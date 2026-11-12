@@ -205,7 +205,7 @@ public:
     uint64_t evict() {
         // remove empty entry in fdmap
         intrusive_list<StreamListNode> freelist;
-        uint64_t near_expire = TTL_us + now;
+        uint64_t near_expire = sat_add(TTL_us, now);
         for (auto it = fdmap.begin(); it != fdmap.end();) {
             auto& list = it->second;
             uint64_t exp;
