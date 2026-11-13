@@ -29,6 +29,7 @@ limitations under the License.
 #include <algorithm>
 #include <set>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include <photon/common/utility.h>
@@ -785,6 +786,14 @@ struct FileCachePoolTest {
     return p->idleTier_.contains(n);
   }
   static bool scan_done(FileCachePool *p) { return p->scanDone_.load(); }
+  static photon::mutex& pool_lock(FileCachePool* p) { return p->m_lock_; }
+  static bool all_files_closed(FileCachePool* p) {
+    SCOPED_LOCK(p->m_lock_);
+    for (auto& it : p->fileIndex_) {
+      if (it.second->openCount != 0) return false;
+    }
+    return true;
+  }
   static uint64_t water_mark(FileCachePool *p) { return p->waterMark_; }
   static int64_t risk_mark(FileCachePool *p) { return p->riskMark_; }
   static uint64_t capacity_in_gb(FileCachePool *p) { return p->capacityInGB_; }
@@ -807,6 +816,353 @@ static bool openClose(ICachePool* pool, const char* name) {
   bool success = (s != nullptr);
   if (s) s->release();
   return success;
+}
+
+struct CacheStoreTest : ICacheStore {
+  static uint32_t refs(ICacheStore* store) {
+    return (store->*&CacheStoreTest::ref_).load();
+  }
+  static bool detached(ICacheStore* store) {
+    return store->*&CacheStoreTest::detached_;
+  }
+  static void mark_need_detach(ICacheStore* store) {
+    store->*&CacheStoreTest::need_detach_ = true;
+  }
+};
+
+TEST(CachePool, release_normal_multi_handle) {
+  std::string root = "ease/cache/release_normal_multi_handle/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cachedFs = new_full_file_cached_fs(nullptr, alignFs, 4 * 1024, 1,
+      1000 * 1000, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr,
+      60'000'000);
+  ASSERT_NE(nullptr, cachedFs);
+  DEFER(delete cachedFs);
+  auto pool = cachedFs->get_pool();
+
+  constexpr int kHandles = 8;
+  std::vector<ICacheStore*> handles;
+  DEFER(for (auto handle : handles) if (handle) handle->release());
+  for (int i = 0; i < kHandles; ++i) {
+    handles.push_back(pool->open("/file", O_CREAT | O_RDWR | O_CACHE_ONLY, 0644));
+    ASSERT_NE(nullptr, handles.back());
+    ASSERT_EQ(handles.front(), handles.back());
+  }
+  auto store = handles.front();
+  EXPECT_EQ(static_cast<uint32_t>(kHandles), CacheStoreTest::refs(store));
+  std::vector<photon::join_handle*> threads;
+  for (int i = 0; i < kHandles; ++i) {
+    threads.push_back(photon::thread_enable_join(photon::thread_create11([&, i] {
+      photon::thread_usleep((i % 4) * 200);
+      handles[i]->release();
+      handles[i] = nullptr;
+    })));
+  }
+  for (auto thread : threads) photon::thread_join(thread);
+
+  auto reopened = pool->open("/file", O_CREAT | O_RDWR | O_CACHE_ONLY, 0644);
+  ASSERT_NE(nullptr, reopened);
+  DEFER(reopened->release());
+  EXPECT_EQ(store, reopened);
+  EXPECT_EQ(1u, CacheStoreTest::refs(reopened));
+  EXPECT_FALSE(CacheStoreTest::detached(reopened));
+}
+
+TEST(CachePool, release_detach_single_handle) {
+  std::string root = "ease/cache/release_detach_single_handle/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cachedFs = new_full_file_cached_fs(nullptr, alignFs, 4 * 1024, 1,
+      1000 * 1000, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr,
+      60'000'000);
+  ASSERT_NE(nullptr, cachedFs);
+  DEFER(delete cachedFs);
+  auto pool = cachedFs->get_pool();
+  auto filePool = dynamic_cast<FileCachePool*>(pool);
+  ASSERT_NE(nullptr, filePool);
+
+  auto store = pool->open("/file", O_CREAT | O_RDWR | O_CACHE_ONLY, 0644);
+  ASSERT_NE(nullptr, store);
+  DEFER(if (store) store->release());
+  char data[4 * 1024];
+  memset(data, 'd', sizeof(data));
+  struct iovec write_iov{data, sizeof(data)};
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(data)), store->pwritev2(&write_iov, 1, 0, 0));
+  EXPECT_EQ(1u, CacheStoreTest::refs(store));
+  store->release(true);
+  store = nullptr;
+  EXPECT_TRUE(FileCachePoolTest::all_files_closed(filePool));
+
+  auto reopened = pool->open("/file", O_CREAT | O_RDWR | O_CACHE_ONLY, 0644);
+  ASSERT_NE(nullptr, reopened);
+  DEFER(reopened->release());
+  EXPECT_FALSE(CacheStoreTest::detached(reopened));
+  EXPECT_EQ(1u, CacheStoreTest::refs(reopened));
+  char buf[sizeof(data)];
+  struct iovec read_iov{buf, sizeof(buf)};
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(buf)), reopened->preadv2(&read_iov, 1, 0, 0));
+  EXPECT_EQ(0, memcmp(buf, data, sizeof(buf)));
+}
+
+TEST(CachePool, release_need_detach_multi_handle_concurrent) {
+  std::string root = "ease/cache/release_need_detach_multi_handle/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cachedFs = new_full_file_cached_fs(nullptr, alignFs, 4 * 1024, 1,
+      1000 * 1000, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr,
+      60'000'000);
+  ASSERT_NE(nullptr, cachedFs);
+  DEFER(delete cachedFs);
+  auto pool = cachedFs->get_pool();
+  auto filePool = dynamic_cast<FileCachePool*>(pool);
+  ASSERT_NE(nullptr, filePool);
+
+  std::atomic<photon::vcpu_base*> vcpu{nullptr};
+  std::atomic<int> init_result{1};
+  std::atomic<bool> stop{false};
+  std::thread worker([&] {
+    int ret = photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE);
+    if (ret != 0) {
+      init_result = ret;
+      return;
+    }
+    vcpu = photon::get_vcpu();
+    init_result = 0;
+    while (!stop) photon::thread_usleep(1000);
+    photon::fini();
+  });
+  DEFER({ stop = true; worker.join(); });
+  while (init_result == 1) photon::thread_usleep(100);
+  ASSERT_EQ(0, init_result.load());
+
+  constexpr int kHandles = 8;
+  std::vector<ICacheStore*> handles;
+  DEFER(for (auto handle : handles) if (handle) handle->release());
+  for (int i = 0; i < kHandles; ++i) {
+    handles.push_back(pool->open("/file", O_CREAT | O_RDWR | O_CACHE_ONLY, 0644));
+    ASSERT_NE(nullptr, handles.back());
+    ASSERT_EQ(handles.front(), handles.back());
+  }
+  EXPECT_EQ(static_cast<uint32_t>(kHandles), CacheStoreTest::refs(handles.front()));
+  char data[4 * 1024];
+  memset(data, 'm', sizeof(data));
+  struct iovec write_iov{data, sizeof(data)};
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(data)),
+            handles.front()->pwritev2(&write_iov, 1, 0, 0));
+  CacheStoreTest::mark_need_detach(handles.front());
+
+  std::atomic<bool> start{false};
+  std::vector<photon::join_handle*> threads;
+  for (int i = 0; i < kHandles; ++i) {
+    auto thread = photon::thread_create11([&, i] {
+      while (!start) photon::thread_yield();
+      photon::thread_usleep((i % 4) * 200);
+      handles[i]->release();
+      handles[i] = nullptr;
+    });
+    threads.push_back(photon::thread_enable_join(thread));
+    if (i & 1) {
+      EXPECT_EQ(0, photon::thread_migrate(thread, vcpu.load()));
+    }
+  }
+  start = true;
+  for (auto thread : threads) photon::thread_join(thread);
+  EXPECT_TRUE(FileCachePoolTest::all_files_closed(filePool));
+
+  auto reopened = pool->open("/file", O_CREAT | O_RDWR | O_CACHE_ONLY, 0644);
+  ASSERT_NE(nullptr, reopened);
+  DEFER(reopened->release());
+  EXPECT_FALSE(CacheStoreTest::detached(reopened));
+  EXPECT_EQ(1u, CacheStoreTest::refs(reopened));
+  char buf[sizeof(data)];
+  struct iovec read_iov{buf, sizeof(buf)};
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(buf)), reopened->preadv2(&read_iov, 1, 0, 0));
+  EXPECT_EQ(0, memcmp(buf, data, sizeof(buf)));
+}
+
+TEST(CachePool, detach_release_concurrent_read) {
+  std::string root = "ease/cache/release_detach_reader/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 4 * 1024, 1,
+      1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+  DEFER(delete roCachedFs);
+  auto pool = roCachedFs->get_pool();
+  auto filePool = dynamic_cast<FileCachePool*>(pool);
+  ASSERT_NE(nullptr, filePool);
+
+  ASSERT_EQ(0, photon_std::work_pool_init(1, photon::INIT_EVENT_DEFAULT,
+                                          photon::INIT_IO_NONE));
+  std::atomic<bool> done{false};
+  std::atomic<bool> setup_failed{false};
+  photon_std::thread scenario([&] {
+    auto trap = pool->open("/trap", O_CREAT | O_RDWR, 0644);
+    auto doomed = pool->open("/doomed", O_CREAT | O_RDWR, 0644);
+    auto s = pool->open("/victim", O_CREAT | O_RDWR, 0644);
+    if (!trap || !doomed || !s) {
+      setup_failed = true;
+      done = true;
+      return;
+    }
+
+    std::atomic<bool> readerReady{false};
+    std::atomic<bool> readerDone{false};
+    std::atomic<bool> stop{false};
+    auto reader = photon::thread_create11([&] {
+      auto s2 = pool->open("/victim", O_RDONLY, 0);
+      if (!s2) {
+        setup_failed = true;
+        readerReady = true;
+        readerDone = true;
+        return;
+      }
+      readerReady = true;
+      char buf[4 * 1024];
+      while (!stop) {
+        // Empty-file reads reach tryget_size() and its store lock.
+        struct iovec iov{buf, sizeof(buf)};
+        s2->preadv2(&iov, 1, 0, 0);
+        photon::thread_yield();
+      }
+      s2->release();
+      readerDone = true;
+    });
+    (void)reader;
+    while (!readerReady) photon::thread_yield();
+    if (setup_failed) {
+      done = true;
+      return;
+    }
+
+    trap->release();
+
+    std::atomic<bool> holding{false};
+    auto holder = photon::thread_create11([&] {
+      SCOPED_LOCK(FileCachePoolTest::pool_lock(filePool));
+      holding = true;
+      photon::thread_usleep(500 * 1000);
+    });
+    (void)holder;
+    while (!holding) photon::thread_yield();
+
+    // Expire one entry through the timer and another through release(true).
+    photon::thread_usleep(5 * 1000);
+    doomed->release();
+    photon::thread_usleep(5 * 1000);
+
+    s->release(true);
+    stop = true;
+
+    while (!readerDone) photon::thread_usleep(1000);
+    done = true;
+  });
+
+  uint64_t waited = 0;
+  while (!done && waited < 10'000'000) {
+    photon::thread_usleep(10 * 1000);
+    waited += 10 * 1000;
+  }
+  // A deadlocked worker cannot be joined, so the watchdog failure is process-fatal.
+  ASSERT_TRUE(done) << "release(true) blocked against a same-vCPU reader";
+  scenario.join();
+  EXPECT_FALSE(setup_failed) << "failed to open a test store";
+  photon_std::work_pool_fini();
+}
+
+TEST(CachePool, concurrent_open_release_stress) {
+  const int kVcpus = 4;
+  const int kThreads = 16;
+  const int kIters = 10'000;
+  const int kNameCount = 8;
+
+  std::string root = "ease/cache/concurrent_open_release/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 4 * 1024, 1,
+      1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr,
+      10'000'000);
+  DEFER(delete roCachedFs);
+  auto pool = roCachedFs->get_pool();
+  auto filePool = dynamic_cast<FileCachePool*>(pool);
+  ASSERT_NE(nullptr, filePool);
+
+  ASSERT_EQ(0, photon_std::work_pool_init(kVcpus, photon::INIT_EVENT_DEFAULT,
+                                          photon::INIT_IO_NONE));
+  DEFER(photon_std::work_pool_fini());
+
+  std::atomic<int> open_failures{0};
+  std::atomic<int> io_failures{0};
+  auto worker = [&](int tid) {
+    std::mt19937 rng(0x9e3779b9u ^ static_cast<uint32_t>(tid));
+    char write_buf[4 * 1024];
+    char read_buf[4 * 1024];
+    memset(write_buf, tid, sizeof(write_buf));
+    for (int it = 0; it < kIters; ++it) {
+      std::string name = "/f_" + std::to_string(rng() % kNameCount);
+      auto store = pool->open(name, O_CREAT | O_RDWR | O_CACHE_ONLY, 0644);
+      if (!store) {
+        open_failures.fetch_add(1);
+        continue;
+      }
+
+      off_t offset = (static_cast<off_t>(tid) * kIters + it) * sizeof(write_buf);
+      struct iovec write_iov{write_buf, sizeof(write_buf)};
+      auto write_ret = store->pwritev2(&write_iov, 1, offset, 0);
+      struct iovec read_iov{read_buf, sizeof(read_buf)};
+      ssize_t read_ret = -1;
+      if (write_ret == static_cast<ssize_t>(sizeof(write_buf))) {
+        read_ret = store->preadv2(&read_iov, 1, offset, 0);
+      }
+      if (read_ret != static_cast<ssize_t>(sizeof(read_buf)) ||
+          memcmp(write_buf, read_buf, sizeof(write_buf)) != 0) {
+        io_failures.fetch_add(1);
+      }
+
+      if ((tid + it) % 16 == 0) {
+        // Detach while another handle keeps the old store alive.
+        auto old_handle = pool->open(name, O_CREAT | O_RDWR | O_CACHE_ONLY, 0644);
+        if (!old_handle) {
+          open_failures.fetch_add(1);
+          store->release();
+          continue;
+        }
+        store->release(true);
+        old_handle->release();
+      } else {
+        store->release();
+      }
+    }
+  };
+
+  std::vector<photon_std::thread> threads;
+  for (int i = 0; i < kThreads; ++i) threads.emplace_back(worker, i);
+  for (auto& t : threads) t.join();
+
+  EXPECT_EQ(0, open_failures.load());
+  EXPECT_EQ(0, io_failures.load());
+  for (int i = 0; i < kNameCount; ++i) {
+    std::string name = "/f_" + std::to_string(i);
+    EXPECT_TRUE(openClose(pool, name.c_str()));
+  }
+
+  pool->stores_clear();
+  EXPECT_TRUE(FileCachePoolTest::all_files_closed(filePool));
 }
 
 // `capacityInGB * kGB` used to overflow and wreck all three water marks
