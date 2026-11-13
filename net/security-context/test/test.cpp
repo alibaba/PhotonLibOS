@@ -816,6 +816,10 @@ TEST(verify_host, ip_san) {
     // certificate for another address does not either.
     auto dns_only = generate_ca_signed_cert({"DNS:127.0.0.1"}, "127.0.0.1");
     EXPECT_FALSE(handshake_accepted(dns_only, "127.0.0.1"));
+    auto ip_only = generate_ca_signed_cert({"IP:127.0.0.1"}, "unrelated.example.com");
+    EXPECT_TRUE(handshake_accepted(ip_only, "127.0.0.1"));
+    EXPECT_TRUE(handshake_accepted(ip_only, "127.0.0.1."));
+    EXPECT_FALSE(handshake_accepted(dns_only, "127.0.0.1."));
     auto other_ip = generate_ca_signed_cert({"IP:10.0.0.1"}, "10.0.0.1");
     EXPECT_FALSE(handshake_accepted(other_ip, "127.0.0.1"));
 }
