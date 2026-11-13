@@ -31,6 +31,7 @@ limitations under the License.
 #include <photon/thread/thread.h>
 
 #include <iterator>
+#include <string>
 #include <vector>
 
 #include "../base_socket.h"
@@ -670,9 +671,30 @@ static TLSSocketStream* find_tls_stream(ISocketStream* stream) {
 }
 
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
-// Send `hostname` as SNI, telling the server which certificate to send. Places
-// no constraint on the certificate that comes back.
+static bool is_ip_literal(const char* hostname) {
+    struct in_addr v4;
+    struct in6_addr v6;
+    return inet_pton(AF_INET, hostname, &v4) == 1 ||
+           inet_pton(AF_INET6, hostname, &v6) == 1;
+}
+
+// A terminal root dot marks an absolute DNS name, but is not part of the name
+// used for SNI or certificate matching. Normalize once so both paths classify
+// IP literals and DNS names identically.
+static const char* strip_root_dot(const char* hostname, std::string& storage) {
+    size_t len = strlen(hostname);
+    if (len < 2 || hostname[len - 1] != '.') return hostname;
+    storage.assign(hostname, len - 1);
+    return storage.c_str();
+}
+
+// Send DNS `hostname` as SNI, telling the server which certificate to send.
+// RFC 6066 forbids literal IPv4 and IPv6 addresses in the HostName field.
 static int tls_set_sni(SSL* ssl, const char* hostname) {
+    if (is_ip_literal(hostname)) {
+        LOG_DEBUG("SNI omitted for IP literal, ", VALUE(hostname));
+        return 0;
+    }
     if (SSL_set_tlsext_host_name(ssl, hostname) != 1)
         LOG_ERROR_RETURN(EINVAL, -1, "failed to set SNI on tls stream, ", VALUE(hostname));
     return 0;
@@ -687,9 +709,7 @@ static int tls_set_verify_host(SSL* ssl, const char* hostname) {
 
     // X509_check_host() never matches iPAddress SANs, so literals take a
     // separate path; without it every IP-literal peer would be rejected.
-    struct in_addr v4;
-    struct in6_addr v6;
-    if (inet_pton(AF_INET, hostname, &v4) == 1 || inet_pton(AF_INET6, hostname, &v6) == 1) {
+    if (is_ip_literal(hostname)) {
         if (X509_VERIFY_PARAM_set1_ip_asc(param, hostname) != 1)
             LOG_ERROR_RETURN(EINVAL, -1, "failed to set verified ip of tls stream, ", VALUE(hostname));
         return 0;
@@ -699,15 +719,10 @@ static int tls_set_verify_host(SSL* ssl, const char* hostname) {
     // Matching a single label, and only in the leftmost position, is already the
     // default; this flag narrows what that one label may look like.
     X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-    // A trailing dot marks a name as absolute. Certificates never carry one, so
-    // it takes no part in the comparison; leaving it in would reject a peer that
-    // the very same name without the dot would have matched.
-    size_t len = strlen(hostname);
-    if (len > 1 && hostname[len - 1] == '.') len--;
     // Note that a zero length would instead clear the list and report success,
     // verifying nothing; that is why an empty hostname is rejected before
     // reaching here.
-    if (X509_VERIFY_PARAM_set1_host(param, hostname, len) != 1)
+    if (X509_VERIFY_PARAM_set1_host(param, hostname, strlen(hostname)) != 1)
         LOG_ERROR_RETURN(EINVAL, -1, "failed to set verified hostname of tls stream, ", VALUE(hostname));
     return 0;
 }
@@ -722,6 +737,9 @@ int tls_stream_set_hostname(ISocketStream* stream, const char* hostname) {
         LOG_ERROR_RETURN(EINVAL, -1, "not a tls stream, ", VALUE(stream));
     if (s->role != SecurityRole::Client)
         LOG_ERROR_RETURN(EINVAL, -1, "only a client verifies a peer's hostname, ", VALUE(hostname));
+
+    std::string normalized_hostname_storage;
+    hostname = strip_root_dot(hostname, normalized_hostname_storage);
 
     if (!s->ctx_impl->verify_hostname)  // verification opted out of, SNI only
         return tls_set_sni(s->ssl, hostname);
@@ -747,6 +765,8 @@ int tls_stream_set_sni(ISocketStream* stream, const char* hostname) {
     auto s = find_tls_stream(stream);
     if (!s)
         LOG_ERROR_RETURN(EINVAL, -1, "not a tls stream, ", VALUE(stream));
+    std::string normalized_hostname_storage;
+    hostname = strip_root_dot(hostname, normalized_hostname_storage);
     return tls_set_sni(s->ssl, hostname);
 #else
     LOG_ERROR_RETURN(ENOSYS, -1, "SNI requires OpenSSL 1.0.2 or later, ", VALUE(hostname));
