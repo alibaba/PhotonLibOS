@@ -970,7 +970,9 @@ TEST(CachePool, release_need_detach_multi_handle_concurrent) {
       handles[i] = nullptr;
     });
     threads.push_back(photon::thread_enable_join(thread));
-    if (i & 1) EXPECT_EQ(0, photon::thread_migrate(thread, vcpu.load()));
+    if (i & 1) {
+      EXPECT_EQ(0, photon::thread_migrate(thread, vcpu.load()));
+    }
   }
   start = true;
   for (auto thread : threads) photon::thread_join(thread);
