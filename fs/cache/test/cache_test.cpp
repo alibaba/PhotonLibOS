@@ -853,7 +853,7 @@ TEST(CachePool, release_normal_multi_handle) {
     ASSERT_EQ(handles.front(), handles.back());
   }
   auto store = handles.front();
-  EXPECT_EQ(kHandles, CacheStoreTest::refs(store));
+  EXPECT_EQ(static_cast<uint32_t>(kHandles), CacheStoreTest::refs(store));
   std::vector<photon::join_handle*> threads;
   for (int i = 0; i < kHandles; ++i) {
     threads.push_back(photon::thread_enable_join(photon::thread_create11([&, i] {
@@ -953,7 +953,7 @@ TEST(CachePool, release_need_detach_multi_handle_concurrent) {
     ASSERT_NE(nullptr, handles.back());
     ASSERT_EQ(handles.front(), handles.back());
   }
-  EXPECT_EQ(kHandles, CacheStoreTest::refs(handles.front()));
+  EXPECT_EQ(static_cast<uint32_t>(kHandles), CacheStoreTest::refs(handles.front()));
   char data[4 * 1024];
   memset(data, 'm', sizeof(data));
   struct iovec write_iov{data, sizeof(data)};
