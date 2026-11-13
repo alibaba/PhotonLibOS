@@ -184,21 +184,38 @@ namespace fs
 
         void release(bool detach = false)
         {
-            bool should_delete = false;
+            int release_flag = 0, delete_flag = 0;
             {
                 SCOPED_LOCK(mt_);
                 if ((detach || need_detach_) && !detached_) {
                     detached_ = true;
-                    pool_->store_release(this, true);
+                    release_flag = 1;
+                    ref_.fetch_add(1, std::memory_order_relaxed);
                 }
 
                 auto ref = ref_.fetch_sub(1, std::memory_order_relaxed);
-                if (ref == 1 && pool_) {
-                    if (!detached_) pool_->store_release(this);
-                    else should_delete = true;
-                } else if (ref == 0) should_delete = true;  // call do_open directly
+                if (release_flag == 0){
+                    if (ref == 1 && pool_) {
+                        if (!detached_) {
+                            release_flag = 2;
+                        } else {
+                            delete_flag = 1;
+                        }
+                    } else if (ref == 0) {
+                        delete_flag = 1;  // call do_open directly
+                    }
+                }
             }
-            if (should_delete) delete this;
+
+            if (release_flag == 1) {
+                pool_->store_release(this, true);
+                SCOPED_LOCK(mt_);
+                auto ref = ref_.fetch_sub(1, std::memory_order_relaxed);
+                if ((ref == 1 && pool_) || ref == 0) delete_flag = 1;
+            }
+
+            if (release_flag == 2) pool_->store_release(this);
+            if (delete_flag) delete this;
         }
 
         ssize_t pread(void *buf, size_t count, off_t offset)
