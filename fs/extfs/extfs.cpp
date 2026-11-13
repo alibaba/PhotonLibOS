@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "extfs.h"
+#include "extfs_io.h"
 #include <ext2fs/ext2fs.h>
 #include <utime.h>
 #include <errno.h>
@@ -40,18 +41,13 @@ limitations under the License.
 #include "extfs_utils.i"
 #include "buffer_file.h"
 
-// add for debug
-static uint64_t total_read_cnt = 0;
-static uint64_t total_write_cnt = 0;
-
-static ext2_filsys do_ext2fs_open(io_manager extfs_manager) {
-    ext2_filsys fs;
-    errcode_t ret = ext2fs_open(
-        "extfs",
+static ext2_filsys do_ext2fs_open(photon::fs::IFile *file) {
+    ext2_filsys fs = nullptr;
+    errcode_t ret = photon::fs::ext2fs_open(
+        file,                 // backend
         EXT2_FLAG_RW,         // flags
         0,                    // superblock
         DEFAULT_BLOCK_SIZE,   // block_size
-        extfs_manager,        // io manager
         &fs                   // ret_fs
     );
     if (ret) {
@@ -131,7 +127,6 @@ static ssize_t do_ext2fs_read(
     LOG_DEBUG("read ", VALUE(offset), VALUE(count));
     ret = ext2fs_file_read(file, buffer, count, &got);
     if (ret) return parse_extfs_error(nullptr, 0, ret);
-    total_read_cnt += got;
     if ((flags & O_NOATIME) == 0) {
         ret = update_xtime(file, EXT_ATIME);
         if (ret) return ret;
@@ -163,7 +158,6 @@ static ssize_t do_ext2fs_write(
     LOG_DEBUG("write ", VALUE(offset), VALUE(count));
     ret = ext2fs_file_write(file, buffer, count, &written);
     if (ret) return parse_extfs_error(nullptr, 0, ret);
-    total_write_cnt += written;
     // update_mtime
     ret = update_xtime(file, EXT_CTIME | EXT_MTIME);
     if (ret) return ret;
@@ -1152,8 +1146,6 @@ static int do_ext2fs_removexattr(ext2_filsys fs, const char *path, const char *n
 namespace photon {
 namespace fs {
 
-extern io_manager new_io_manager(photon::fs::IFile *file);
-
 class ExtFileSystem;
 class ExtFile : public photon::fs::VirtualFile, public photon::fs::IFileXAttr {
 public:
@@ -1286,17 +1278,11 @@ static const uint64_t kMinimalInoLife = 1ULL * 1000 * 1000; // ino lives at leas
 class ExtFileSystem : public photon::fs::IFileSystem, public photon::fs::IFileSystemXAttr {
 public:
     ext2_filsys fs;
-    io_manager extfs_io_manager;
     ExtFileSystem(photon::fs::IFile *_image_file, uint32_t buffer_size, uint32_t block_size) : ino_cache(kMinimalInoLife), base_file(_image_file) {
-        ExtFileSystem::mutex.lock();
-        DEFER(ExtFileSystem::mutex.unlock());
         if (buffer_size) {
             buffer_file = new BufferFile(_image_file, buffer_size, block_size);
-            extfs_io_manager = new_io_manager(buffer_file);
-        } else {
-            extfs_io_manager = new_io_manager(_image_file);
         }
-        fs = do_ext2fs_open(extfs_io_manager);
+        fs = do_ext2fs_open(buffer_file ? buffer_file : _image_file);
         if (fs == nullptr) {
             return;
         }
@@ -1311,7 +1297,6 @@ public:
             LOG_INFO("ext2fs flushed and closed");
         }
         delete buffer_file;
-        LOG_INFO(VALUE(total_read_cnt), VALUE(total_write_cnt));
     }
     photon::fs::IFile *open(const char *path, int flags, mode_t mode) override {
         ext2_file_t file = do_ext2fs_open_file(fs, path, flags, mode);
@@ -1500,11 +1485,7 @@ private:
     ObjectCache<estring, ext2_ino_t *> ino_cache;
     photon::fs::IFile *buffer_file = nullptr;
     photon::fs::IFile *base_file = nullptr;
-
-    static photon::mutex mutex; // lock from init io_manager to ext2fs_open
 };
-// Initialize the static member.
-photon::mutex ExtFileSystem::mutex;
 
 photon::fs::IFileSystem *ExtFile::filesystem() {
     return m_fs;

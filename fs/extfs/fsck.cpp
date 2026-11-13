@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "extfs.h"
+#include "extfs_io.h"
 #include "default_uuid.h"
 #include <string.h>
 #include <arpa/inet.h>
@@ -43,8 +44,6 @@ static const uint32_t kSaneDtime = 0xFFFFFFFFu;
 
 namespace photon {
 namespace fs {
-
-extern io_manager new_io_manager(photon::fs::IFile *file);
 
 namespace {
 // An internal tally, kept only to log a summary of the run. It is not part of
@@ -405,23 +404,19 @@ int fsck_extfs(photon::fs::IFile *file, const ExtfsFsckOptions &opt) {
     FsckStats stats;
     auto rpt = &stats;
 
-    auto manager = new_io_manager(file);
     ext2_filsys fs = nullptr;
     int flags = EXT2_FLAG_RW | EXT2_FLAG_64BITS;
-    errcode_t err = ext2fs_open2("virtual-dev", nullptr, flags, 0, 0, manager, &fs);
+    errcode_t err = ext2fs_open2(file, flags, 0, 0, &fs);
     if (err) {
         // an image with a bogus uuid may well have stale group descriptor
         // checksums; we are going to recompute every one of them anyway
         LOG_WARN("ext2fs_open2 failed (err=`), retrying while ignoring checksum errors", err);
-        err = ext2fs_open2("virtual-dev", nullptr, flags | EXT2_FLAG_IGNORE_CSUM_ERRORS,
-                           0, 0, manager, &fs);
+        err = ext2fs_open2(file, flags | EXT2_FLAG_IGNORE_CSUM_ERRORS, 0, 0, &fs);
     }
     if (err) LOG_ERROR_RETURN(EIO, -1, "failed to open the image, err=`", err);
     DEFER(ext2fs_close_free(&fs));
 
     fs->default_bitmap_type = EXT2FS_BMAP64_RBTREE;
-    // extfs_zeroout() is a no-op stub, any zeroing through it would be lost
-    fs->io->manager->zeroout = nullptr;
     // keep s_wtime stable so that fixing up an image stays reproducible, and so
     // that e2fsck keeps skipping its low dtime heuristic
     fs->now = 1;

@@ -14,11 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "extfs.h"
+#include "extfs_io.h"
 #include <ext2fs/ext2fs.h>
 #include <sys/stat.h>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <photon/common/alog.h>
 #include <photon/common/callback.h>
-#include <photon/thread/thread.h>
+#include <photon/common/utility.h>
+#include <photon/fs/filesystem.h>
 
 static errcode_t extfs_open(const char *name, int flags, io_channel *channel);
 static errcode_t extfs_close(io_channel channel);
@@ -32,6 +38,29 @@ static errcode_t extfs_discard(io_channel channel, unsigned long long block, uns
 static errcode_t extfs_cache_readahead(io_channel channel, unsigned long long block, unsigned long long count);
 static errcode_t extfs_zeroout(io_channel channel, unsigned long long block, unsigned long long count);
 
+namespace {
+
+constexpr char kDevPrefix[] = "extfs:";
+constexpr size_t kDevNameSize = 32;    // "extfs:" + 16 hex digits + '\0'
+
+// The device name encodes IFile*, so each open is unique and extfs_open() can
+// recover the backend without any state shared across calls.
+void format_dev_name(photon::fs::IFile *file, char *buf, size_t size) {
+    snprintf(buf, size, "%s%llx", kDevPrefix, (unsigned long long)(uintptr_t)file);
+}
+
+photon::fs::IFile *file_from_dev_name(const char *name) {
+    if (!name) return nullptr;
+    constexpr size_t plen = sizeof(kDevPrefix) - 1;
+    if (strncmp(name, kDevPrefix, plen) != 0) return nullptr;
+    char *end = nullptr;
+    auto addr = strtoull(name + plen, &end, 16);
+    if (addr == 0 || !end || *end != '\0') return nullptr;
+    return reinterpret_cast<photon::fs::IFile *>(addr);
+}
+
+}  // namespace
+
 struct unix_private_data {
     int magic;
     int dev;
@@ -41,9 +70,16 @@ struct unix_private_data {
     ext2_loff_t offset;
     void *bounce;
     struct struct_io_stats io_stats;
+
+    // per-channel state, bound at open and released at close
+    photon::fs::IFile *file;
+    char *zero_buf;                 // lazily allocated, private to this channel
+    size_t zero_stride;             // in blocks
 };
 
-static struct struct_io_manager extfs_io_manager = {
+// Read-only after init: the manager holds no per-open state; the context is
+// passed through the device name.
+static struct_io_manager extfs_io_manager = {
     .magic              = EXT2_ET_MAGIC_IO_MANAGER,
     .name               = "extfs I/O Manager",
     .open               = extfs_open,
@@ -63,52 +99,60 @@ static struct struct_io_manager extfs_io_manager = {
     .reserved           = {},
 };
 
-static photon::fs::IFile *backend_file;
-// add for debug
-static uint64_t total_read_cnt = 0;
-static uint64_t total_write_cnt = 0;
-
 static errcode_t extfs_open(const char *name, int flags, io_channel *channel) {
-    LOG_INFO(VALUE(name));
-    DEFER(LOG_INFO("opened"));
+    auto file = file_from_dev_name(name);
+    if (!file) {
+        LOG_ERROR("invalid extfs device name `, expected `<hex IFile*>", name, kDevPrefix);
+        return EXT2_ET_BAD_DEVICE_NAME;
+    }
+
     io_channel io = nullptr;
+    errcode_t ret = ext2fs_get_mem(sizeof(*io), &io);
+    if (ret) return ret;
+    memset(io, 0, sizeof(*io));
+
+    bool ok = false;
+    DEFER({
+        if (!ok) {
+            ext2fs_free_mem(&io->private_data);
+            ext2fs_free_mem(&io->name);
+            ext2fs_free_mem(&io);
+        }
+    });
+
     struct unix_private_data *data = nullptr;
-    errcode_t retval;
-    retval = ext2fs_get_mem(sizeof(struct struct_io_channel), &io);
-    if (retval)
-        return -retval;
-    memset(io, 0, sizeof(struct struct_io_channel));
-    io->magic = EXT2_ET_MAGIC_IO_CHANNEL;
-    retval = ext2fs_get_mem(sizeof(struct unix_private_data), &data);
-    if (retval)
-        return -retval;
-    io->manager = &extfs_io_manager;
-    retval = ext2fs_get_mem(strlen(name) + 1, &io->name);
-    if (retval)
-        return -retval;
-    strcpy(io->name, name);
-    io->private_data = data;
-    io->block_size = 1024;
-    io->read_error = 0;
-    io->write_error = 0;
-    io->refcount = 1;
-    io->flags = 0;
-    io->reserved[0] = reinterpret_cast<std::uintptr_t>(backend_file);
-    LOG_DEBUG(VALUE(backend_file), VALUE((void *)io->reserved[0]));
-    memset(data, 0, sizeof(struct unix_private_data));
+    ret = ext2fs_get_mem(sizeof(*data), &data);
+    if (ret) return ret;
+    memset(data, 0, sizeof(*data));
     data->magic = EXT2_ET_MAGIC_UNIX_IO_CHANNEL;
     data->io_stats.num_fields = 2;
     data->flags = flags;
-    data->dev = 0;
+    data->file = file;
+    io->private_data = data;
+
+    ret = ext2fs_get_mem(strlen(name) + 1, &io->name);
+    if (ret) return ret;
+    strcpy(io->name, name);
+
+    io->magic = EXT2_ET_MAGIC_IO_CHANNEL;
+    io->manager = &extfs_io_manager;
+    io->block_size = 1024;          // overridden by extfs_set_blksize()
+    io->refcount = 1;
+
+    ok = true;
     *channel = io;
+    LOG_DEBUG("extfs opened, `", name);
     return 0;
 }
 
 static errcode_t extfs_close(io_channel channel) {
     if (--channel->refcount > 0)
         return 0;
-    if (channel->private_data)
+    auto data = reinterpret_cast<unix_private_data *>(channel->private_data);
+    if (data) {
+        free(data->zero_buf);
         ext2fs_free_mem(&channel->private_data);
+    }
     if (channel->name)
         ext2fs_free_mem(&channel->name);
     LOG_INFO("extfs close");
@@ -122,17 +166,14 @@ static errcode_t extfs_set_blksize(io_channel channel, int blksize) {
 }
 
 static errcode_t extfs_read_blk(io_channel channel, unsigned long block, int count, void *buf) {
+    auto data = reinterpret_cast<unix_private_data *>(channel->private_data);
     off_t offset = (ext2_loff_t)block * channel->block_size;
     ssize_t size = count < 0 ? -count : (ext2_loff_t)count * channel->block_size;
-    auto file = reinterpret_cast<photon::fs::IFile *>(channel->reserved[0]);
-    // LOG_DEBUG("read ", VALUE(offset), VALUE(size));
-    auto res = file->pread(buf, size, offset);
-    if (res == size) {
-        total_read_cnt += size;
+    auto res = data->file->pread(buf, size, offset);
+    if (res == size)
         return 0;
-    }
     LOG_ERROR("failed to pread, got `, expect `", res, size);
-    return -1;
+    return errno ? errno : EIO;
 }
 
 static errcode_t extfs_read_blk64(io_channel channel, unsigned long long block, int count, void *buf) {
@@ -140,17 +181,14 @@ static errcode_t extfs_read_blk64(io_channel channel, unsigned long long block, 
 }
 
 static errcode_t extfs_write_blk(io_channel channel, unsigned long block, int count, const void *buf) {
+    auto data = reinterpret_cast<unix_private_data *>(channel->private_data);
     off_t offset = (ext2_loff_t)block * channel->block_size;
     ssize_t size = count < 0 ? -count : (ext2_loff_t)count * channel->block_size;
-    auto file = reinterpret_cast<photon::fs::IFile *>(channel->reserved[0]);
-    // LOG_DEBUG("write ", VALUE(offset), VALUE(size));
-    auto res = file->pwrite(buf, size, offset);
-    if (res == size) {
-        total_write_cnt += size;
+    auto res = data->file->pwrite(buf, size, offset);
+    if (res == size)
         return 0;
-    }
     LOG_ERROR("failed to pwrite, got `, expect `", res, size);
-    return -1;
+    return errno ? errno : EIO;
 }
 
 static errcode_t extfs_write_blk64(io_channel channel, unsigned long long block, int count, const void *buf) {
@@ -169,16 +207,77 @@ static errcode_t extfs_cache_readahead(io_channel channel, unsigned long long bl
     return 0;
 }
 
+// Real zero-fill. Once ext2fs_zero_blocks2() gets 0 back it returns immediately
+// without allocating libext2fs' process-wide static buffer, making the cleanup
+// in ext2fs_free() a no-op; this is what keeps concurrent images free of
+// cross-image use-after-free. The buffer is private to this channel.
 static errcode_t extfs_zeroout(io_channel channel, unsigned long long block, unsigned long long count) {
+    if (count == 0)
+        return 0;
+    auto data = reinterpret_cast<unix_private_data *>(channel->private_data);
+    size_t bs = channel->block_size;
+    if (bs == 0)
+        return EINVAL;
+
+    const size_t kMaxStrideBytes = 1UL << 20;
+    size_t stride = kMaxStrideBytes / bs ? kMaxStrideBytes / bs : 1;
+    if (count < stride)
+        stride = count;
+    if (data->zero_stride < stride) {
+        free(data->zero_buf);
+        data->zero_buf = (char *)calloc(1, stride * bs);
+        if (!data->zero_buf) {
+            data->zero_stride = 0;
+            LOG_ERROR_RETURN(ENOMEM, ENOMEM, "failed to allocate zero buffer, ` bytes", stride * bs);
+        }
+        data->zero_stride = stride;
+    }
+
+    off_t off = (off_t)block * bs;
+    while (count) {
+        size_t n = count < data->zero_stride ? count : data->zero_stride;
+        size_t left = n * bs;
+        while (left) {
+            auto written = data->file->pwrite(data->zero_buf, left, off);
+            if (written <= 0) {
+                LOG_ERROR("failed to zero blocks, got `, expect `", written, left);
+                return errno ? errno : EIO;
+            }
+            left -= written;
+            off += written;
+        }
+        count -= n;
+    }
     return 0;
 }
 
 namespace photon {
 namespace fs {
 
-io_manager new_io_manager(photon::fs::IFile *file) {
-    backend_file = file;
-    return &extfs_io_manager;
+errcode_t ext2fs_open2(IFile *file, int flags, unsigned int superblock,
+                       unsigned int block_size, ext2_filsys *fs) {
+    char name[kDevNameSize];
+    format_dev_name(file, name, sizeof(name));
+    *fs = nullptr;
+    return ::ext2fs_open2(name, nullptr, flags, superblock, block_size,
+                          &extfs_io_manager, fs);
+}
+
+errcode_t ext2fs_open(IFile *file, int flags, unsigned int superblock,
+                      unsigned int block_size, ext2_filsys *fs) {
+    char name[kDevNameSize];
+    format_dev_name(file, name, sizeof(name));
+    *fs = nullptr;
+    return ::ext2fs_open(name, flags, superblock, block_size,
+                         &extfs_io_manager, fs);
+}
+
+errcode_t ext2fs_initialize(IFile *file, int flags,
+                            struct ext2_super_block *param, ext2_filsys *fs) {
+    char name[kDevNameSize];
+    format_dev_name(file, name, sizeof(name));
+    *fs = nullptr;
+    return ::ext2fs_initialize(name, flags, param, &extfs_io_manager, fs);
 }
 
 }
