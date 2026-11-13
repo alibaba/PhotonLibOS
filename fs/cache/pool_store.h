@@ -184,27 +184,38 @@ namespace fs
 
         void release(bool detach = false)
         {
-            bool do_detach = false;
-            if (detach) {
-                SCOPED_LOCK(mt_);
-                do_detach = !detached_;
-                detached_ = true;
-            }
-            // Detach first so the last releaser cannot delete a pool-owned store.
-            if (do_detach) pool_->store_release(this, true);
-
-            bool do_release = false, should_delete = false;
+            int release_flag = 0, delete_flag = 0;
             {
                 SCOPED_LOCK(mt_);
-                auto ref = ref_.fetch_sub(1, std::memory_order_acq_rel);
-                if (ref == 1 && pool_) {
-                    if (detached_) should_delete = true;
-                    else do_release = true;
-                } else if (ref == 0) should_delete = true;  // call do_open directly
+                if ((detach || need_detach_) && !detached_) {
+                    detached_ = true;
+                    release_flag = 1;
+                    ref_.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                auto ref = ref_.fetch_sub(1, std::memory_order_relaxed);
+                if (release_flag == 0){
+                    if (ref == 1 && pool_) {
+                        if (!detached_) {
+                            release_flag = 2;
+                        } else {
+                            delete_flag = 1;
+                        }
+                    } else if (ref == 0) {
+                        delete_flag = 1;  // call do_open directly
+                    }
+                }
             }
 
-            if (do_release) pool_->store_release(this);
-            if (should_delete) delete this;
+            if (release_flag == 1) {
+                pool_->store_release(this, true);
+                SCOPED_LOCK(mt_);
+                auto ref = ref_.fetch_sub(1, std::memory_order_relaxed);
+                if ((ref == 1 && pool_) || ref == 0) delete_flag = 1;
+            }
+
+            if (release_flag == 2) pool_->store_release(this);
+            if (delete_flag) delete this;
         }
 
         ssize_t pread(void *buf, size_t count, off_t offset)
@@ -296,6 +307,7 @@ namespace fs
         bool truncated_ = false;
         bool recycled_ = false;
         bool detached_ = false;
+        bool need_detach_ = false;
         friend class ICachePool;
     };
 
