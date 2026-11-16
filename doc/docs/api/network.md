@@ -341,7 +341,7 @@ Defined in `<photon/net/http/streams.h>`. Full RFC 9113 / 7541 implementation:
 - `TLSContext`: cert, key, passphrase, verify mode, ALPN protos.
 - `new_tls_stream(ctx, base, role)`: wrap a socket with TLS.
 - `new_tls_client/server(ctx, base)`: factory wrappers.
-- `tls_stream_set_hostname()`: send SNI, and check the peer certificate against the hostname.
+- `tls_stream_set_hostname()`: send DNS hostnames as SNI (IP literals are omitted) and check the peer certificate against the requested hostname or IP address.
 - `tls_stream_set_sni()`: send SNI only, without checking the name.
 - `tls_stream_get_alpn_selected()`: negotiated ALPN protocol.
 
@@ -350,7 +350,7 @@ Defined in `<photon/net/http/streams.h>`. Full RFC 9113 / 7541 implementation:
 Two independent checks are needed, and each is useless alone:
 
 1. `set_verify_mode(VerifyMode::PEER)` — plus `set_ca_cert()` or `set_ca_file()`, which turn `PEER` on as a side effect — checks that the certificate chains up to a trusted CA. This proves the certificate is genuine, not who it belongs to.
-2. `tls_stream_set_hostname()` checks that the certificate was actually issued for the host you asked for. Without it, any certificate signed by a trusted CA is accepted, including one issued to an attacker for a domain they control.
+2. `tls_stream_set_hostname()` checks that the certificate was actually issued for the host you asked for. DNS hostnames are sent as SNI; IP literals are verified as addresses but omitted from SNI because RFC 6066 does not allow address literals in its `HostName` field. Without the name check, any certificate signed by a trusted CA is accepted, including one issued to an attacker for a domain they control.
 
 `tls_stream_set_hostname()` must be called before the first read or write, as the client handshake is deferred until then. Hostnames are matched against `dNSName` SANs and IP literals against `iPAddress` SANs, falling back to the subject common name when the certificate carries no SAN. A wildcard matches a single label, in the leftmost position only, and may not cover part of a label (`www*.example.com` is rejected).
 
