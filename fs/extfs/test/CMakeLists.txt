@@ -1,3 +1,7 @@
 photon_add_test(test-extfs test.cpp)
 photon_add_test(test-extfs-fsck test_fsck.cpp)
 photon_add_test(test-extfs-ioerr test_ioerr.cpp)
+if(PHOTON_ENABLE_RESIZE)
+    photon_add_test(test-extfs-resize test_resize.cpp)
+    target_compile_definitions(test-extfs-resize PRIVATE PHOTON_ENABLE_RESIZE)
+endif()
