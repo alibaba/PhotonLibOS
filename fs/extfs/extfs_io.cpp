@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "extfs.h"
+#include <errno.h>
 #include <ext2fs/ext2fs.h>
 #include <sys/stat.h>
 #include <photon/common/alog.h>
@@ -76,16 +77,16 @@ static errcode_t extfs_open(const char *name, int flags, io_channel *channel) {
     errcode_t retval;
     retval = ext2fs_get_mem(sizeof(struct struct_io_channel), &io);
     if (retval)
-        return -retval;
+        return retval;
     memset(io, 0, sizeof(struct struct_io_channel));
     io->magic = EXT2_ET_MAGIC_IO_CHANNEL;
     retval = ext2fs_get_mem(sizeof(struct unix_private_data), &data);
     if (retval)
-        return -retval;
+        return retval;
     io->manager = &extfs_io_manager;
     retval = ext2fs_get_mem(strlen(name) + 1, &io->name);
     if (retval)
-        return -retval;
+        return retval;
     strcpy(io->name, name);
     io->private_data = data;
     io->block_size = 1024;
@@ -132,7 +133,9 @@ static errcode_t extfs_read_blk(io_channel channel, unsigned long block, int cou
         return 0;
     }
     LOG_ERROR("failed to pread, got `, expect `", res, size);
-    return -1;
+    if (res < 0)
+        return errno ? errno : EIO;
+    return EXT2_ET_SHORT_READ;
 }
 
 static errcode_t extfs_read_blk64(io_channel channel, unsigned long long block, int count, void *buf) {
@@ -150,7 +153,9 @@ static errcode_t extfs_write_blk(io_channel channel, unsigned long block, int co
         return 0;
     }
     LOG_ERROR("failed to pwrite, got `, expect `", res, size);
-    return -1;
+    if (res < 0)
+        return errno ? errno : EIO;
+    return EXT2_ET_SHORT_WRITE;
 }
 
 static errcode_t extfs_write_blk64(io_channel channel, unsigned long long block, int count, const void *buf) {
