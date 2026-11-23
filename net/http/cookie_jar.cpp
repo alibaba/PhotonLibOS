@@ -64,9 +64,8 @@ public:
             auto Cookies = it.second();
             Parser p(Cookies);
             auto key = Cookies | p.extract_until_char('=');
-            if (key.size() == 0) continue;
+            if (key.size() == 0 || key.size() == Cookies.size()) continue; // no '='
             auto value = Cookies | p.extract_until_char(';');
-            if (value.size() == 0) continue;
             p.skip_spaces();
             bool HttpOnly = false;
             bool Partitioned = false;
@@ -81,13 +80,19 @@ public:
                 auto k2 = attr | ap.extract_until_char('=');
                 auto v2 = attr | ap.extract_until_char('\0');
                 if (k2 == "Max-Age") {
-                    if (uint64_t age = v2.to_uint64()) expire = time(0) + age;
-                    else LOG_DEBUG("invalid integer format for 'Max-Age': ", v2);
+                    // RFC 6265 5.2.2: zero or negative means "expire now"
+                    int64_t age;
+                    if (!v2.to_int64_check(&age))
+                        LOG_DEBUG("invalid integer format for 'Max-Age': ", v2);
+                    else expire = (age > 0) ? time(0) + age : 0;
                 } else if (k2 == "Expires") {
-                    struct tm tm;
+                    struct tm tm = {};
                     auto ok = strptime(v2.data(), "%a, %d %b %Y %H:%M:%S", &tm);
                     if (!ok) LOG_DEBUG("invalid time format for 'Expires': ", v2);
-                    else expire = mktime(&tm);
+                    else {  // the date is in GMT, not local time
+                        auto t = timegm(&tm);
+                        expire = (t > 0) ? t : 0;
+                    }
                 }
                 else if (k2 == "SameSite" && v2.size() > 0) SameSite = v2[0];
                 else if (k2 == "Path") Path = v2;
