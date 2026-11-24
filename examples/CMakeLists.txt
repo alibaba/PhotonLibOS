@@ -3,7 +3,7 @@
 link_libraries(${GFLAGS_LIBRARIES})
 include_directories(${GFLAGS_INCLUDE_DIRS})
 
-photon_add_example(simple-example simple/simple.cpp)
+photon_add_example(simple-socket simple-socket/simple-socket.cpp)
 
 photon_add_example(net-perf perf/net-perf.cpp
     DEFS
@@ -20,6 +20,8 @@ endif ()
 
 photon_add_example(http-perf-client perf/http/http-client.cpp)
 photon_add_example(http-perf-server perf/http/http-server.cpp)
+photon_add_example(http-fs-server http/fs_server.cpp)
+photon_add_example(http-forward-proxy-server http/forward_proxy_server.cpp)
 photon_add_example(rpc-example-client rpc/client.cpp rpc/client_main.cpp)
 photon_add_example(rpc-example-server rpc/server.cpp rpc/server_main.cpp)
 photon_add_example(sync-primitive sync-primitive/sync-primitive.cpp)
