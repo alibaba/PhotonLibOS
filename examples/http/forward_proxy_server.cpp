@@ -24,8 +24,10 @@ limitations under the License.
 #include <photon/photon.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/net/http/server.h>
+#ifdef __linux__
 #include <sys/prctl.h>
 #include <malloc.h>
+#endif
 
 using namespace photon;
 using namespace photon::net;
@@ -38,13 +40,15 @@ static bool stop_flag = false;
 static void stop_handler(int signal) { stop_flag = true; }
 
 int main(int argc, char** argv) {
+#ifdef __linux__
     mallopt(M_TRIM_THRESHOLD, 128 * 1024);
     prctl(PR_SET_THP_DISABLE, 1);
+#endif
 
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     photon::init(INIT_EVENT_DEFAULT, INIT_IO_DEFAULT);
     DEFER(photon::fini());
-    set_log_output_level(ALOG_INFO);
+    set_log_output_level(ALOG_DEBUG);
 
     photon::block_all_signal();
     photon::sync_signal(SIGINT, &stop_handler);

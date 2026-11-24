@@ -212,6 +212,6 @@ The \` symbol is a generic placeholder for multiple types of elements.
 
 ### Full source code
 
-You may visit https://github.com/alibaba/PhotonLibOS/blob/main/examples/simple/simple.cpp to get the source.
+You may visit https://github.com/alibaba/PhotonLibOS/blob/main/examples/simple-socket/simple-socket.cpp to get the source.
 
 Or create your own CMake demo project guided by the [How to integrate](./how-to-integrate.md) doc.

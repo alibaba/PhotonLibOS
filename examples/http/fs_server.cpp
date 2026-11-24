@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     photon::init(INIT_EVENT_DEFAULT, INIT_IO_DEFAULT);
     DEFER(photon::fini());
-    set_log_output_level(ALOG_INFO);
+    set_log_output_level(ALOG_DEBUG);
 
     photon::block_all_signal();
     photon::sync_signal(SIGINT, &stop_handler);

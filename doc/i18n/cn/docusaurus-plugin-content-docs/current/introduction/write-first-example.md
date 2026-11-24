@@ -206,6 +206,6 @@ LOG_INFO 是 Photon 独特的日志系统，它基于大量的模板元编程技
 
 ### 完整代码
 
-访问 https://github.com/alibaba/PhotonLibOS/blob/main/examples/simple/simple.cpp 查看完整代码。
+访问 https://github.com/alibaba/PhotonLibOS/blob/main/examples/simple-socket/simple-socket.cpp 查看完整代码。
 
 或者按照 [集成](./how-to-integrate.md) 中展示的教程，定制你自己的 CMake 项目。 
