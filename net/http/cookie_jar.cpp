@@ -21,6 +21,7 @@ limitations under the License.
 #include "parser.h"
 #include <photon/common/string-keyed.h>
 #include <photon/common/estring.h>
+#include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 
@@ -63,16 +64,21 @@ public:
         for (auto it = r.first; it != r.second; ++it) {
             auto Cookies = it.second();
             Parser p(Cookies);
-            auto key = Cookies | p.extract_until_char('=');
-            if (key.size() == 0) continue;
-            auto value = Cookies | p.extract_until_char(';');
-            if (value.size() == 0) continue;
+            // RFC 6265 5.2 steps 1-2: the name-value-pair ends at the first ';'
+            // and must contain a '='
+            auto pair = Cookies | p.extract_until_char(';');
             p.skip_spaces();
+            auto eq = pair.find('=');
+            if (eq == 0 || eq == pair.npos) continue;
+            auto key = pair.substr(0, eq), value = pair.substr(eq + 1);
             bool HttpOnly = false;
             bool Partitioned = false;
             bool Secure = false;
             char SameSite = 0;
-            uint64_t expire = -1ULL;
+            // RFC 6265 5.3 step 3: the last Max-Age wins, and Max-Age wins over
+            // Expires regardless of order
+            bool has_max_age = false, has_expires = false;
+            uint64_t max_age = 0, expires = 0;
             estring_view Path, Domain;
             while(!p.is_done()) {
                 auto attr = Cookies | p.extract_until_char(';');
@@ -81,13 +87,27 @@ public:
                 auto k2 = attr | ap.extract_until_char('=');
                 auto v2 = attr | ap.extract_until_char('\0');
                 if (k2 == "Max-Age") {
-                    if (uint64_t age = v2.to_uint64()) expire = time(0) + age;
-                    else LOG_DEBUG("invalid integer format for 'Max-Age': ", v2);
+                    // RFC 6265 5.2.2: the value is [-]DIGIT+, and zero or
+                    // negative means "expire now"
+                    auto v = v2.trim();
+                    bool neg = v.starts_with("-");
+                    auto digits = neg ? v.substr(1) : v;
+                    if (!digits.empty() && digits.find_first_not_of(charset("0123456789")) == digits.npos) {
+                        has_max_age = true;   // more than 19 significant digits saturates
+                        auto nz = digits.find_first_not_of('0');
+                        auto sig = (nz == digits.npos) ? estring_view() : digits.substr(nz);
+                        max_age = neg ? 0 : (sig.size() > 19) ? -1ULL : sig.to_uint64();
+                    } else LOG_DEBUG("invalid integer format for 'Max-Age': ", v2);
                 } else if (k2 == "Expires") {
-                    struct tm tm;
+                    struct tm tm = {};
                     auto ok = strptime(v2.data(), "%a, %d %b %Y %H:%M:%S", &tm);
-                    if (!ok) LOG_DEBUG("invalid time format for 'Expires': ", v2);
-                    else expire = mktime(&tm);
+                    // RFC 6265 5.1.1: a year before 1601 fails to parse
+                    if (!ok || tm.tm_year + 1900 < 1601) LOG_DEBUG("invalid time format for 'Expires': ", v2);
+                    else {  // the date is in GMT, not local time
+                        auto t = timegm(&tm);
+                        has_expires = true;
+                        expires = (t > 0) ? t : 0;
+                    }
                 }
                 else if (k2 == "SameSite" && v2.size() > 0) SameSite = v2[0];
                 else if (k2 == "Path") Path = v2;
@@ -97,6 +117,9 @@ public:
                 else if (k2 == "Partitioned") Partitioned = true;
                 else LOG_DEBUG("unknown cookie attribute ", attr);
             }
+            uint64_t expire = -1ULL;
+            if (has_max_age) expire = max_age ? sat_add(time(0), max_age) : 0;
+            else if (has_expires) expire = expires;
             #define LOG_DEBUG_CONTINUE(...) { LOG_DEBUG(__VA_ARGS__); continue; }
             if (!Secure) {
                 if (Partitioned)

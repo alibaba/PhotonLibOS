@@ -116,6 +116,94 @@ TEST(cookie_jar, basic) {
     EXPECT_EQ(true, s == "key=value");
 }
 
+static void set_and_check(SimpleCookieJar& jar, const char* deletion) {
+    std::unique_ptr<ResponseHeaderAdaptor> set(new_resp("sid=abc; Path=/"));
+    jar.get_cookies_from_headers("host", set.get());
+    ASSERT_EQ("sid=abc", get_cookie(&jar, "host"));
+    std::unique_ptr<ResponseHeaderAdaptor> del(new_resp(deletion));
+    jar.get_cookies_from_headers("host", del.get());
+    EXPECT_EQ("", get_cookie(&jar, "host")) << deletion;
+}
+
+TEST(cookie_jar, server_deletes_cookie) {
+    // RFC 6265 5.2.2: Max-Age <= 0 expires the cookie; empty values are valid.
+    for (auto deletion : {
+            "sid=deleted; Max-Age=0",
+            "sid=deleted; Max-Age=-1",
+            "sid=; Path=/; Max-Age=0",
+            "sid=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+            // Django: attribute names are matched case-sensitively, so this is
+            // deleted by Max-Age=0, not by the lowercase expires
+            "sid=\"\"; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/",
+            "sid=deleted; Max-Age=0 ; Path=/",                // 5.2: WSP around the value
+            "sid=deleted; Max-Age=-9223372036854775808",
+            "sid=deleted; Max-Age=00000000000000000000",
+            "sid=deleted; Expires=Mon, 01 Jan 1900 00:00:00 GMT",
+            "sid=deleted; Max-Age=0; Expires=Wed, 24 Nov 3040 09:55:55 GMT"}) {  // 5.3: Max-Age wins
+        SimpleCookieJar jar;
+        set_and_check(jar, deletion);
+    }
+}
+
+TEST(cookie_jar, ignores_invalid_expiry) {
+    // The cookie is stored, but these attributes must not make it expire.
+    for (auto header : {
+            "sid=x; Max-Age=0abc",          // 5.2.2: non-DIGIT in the value
+            "sid=x; Max-Age=x0",
+            "sid=x; Max-Age=",
+            "sid=x; Max-Age=-",
+            "sid=x; Max-Age=9223372036854775807",       // no overflow
+            "sid=x; Max-Age=99999999999999999999999",
+            "sid=x; Max-Age=000000000000000000000100",
+            "sid=x; Expires=Mon, 01 Jan 1500 00:00:00 GMT",   // 5.1.1: year < 1601
+            "sid=x; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=100",  // 5.3
+            "sid=x; Max-Age=0; Max-Age=100"}) {                // last Max-Age wins
+        SimpleCookieJar jar;
+        std::unique_ptr<ResponseHeaderAdaptor> set(new_resp(header));
+        jar.get_cookies_from_headers("host", set.get());
+        EXPECT_EQ("sid=x", get_cookie(&jar, "host")) << header;
+    }
+}
+
+TEST(cookie_jar, empty_value) {
+    SimpleCookieJar jar;
+    std::unique_ptr<ResponseHeaderAdaptor> empty(new_resp("sid="));
+    jar.get_cookies_from_headers("host", empty.get());
+    EXPECT_EQ("sid=", get_cookie(&jar, "host"));
+    // a name-value pair without '=' is ignored (RFC 6265 5.2)
+    SimpleCookieJar jar2;
+    std::unique_ptr<ResponseHeaderAdaptor> bare(new_resp("sid"));
+    jar2.get_cookies_from_headers("host", bare.get());
+    EXPECT_EQ("", get_cookie(&jar2, "host"));
+    // the '=' must be in the first ';'-separated pair, not in a later attribute
+    SimpleCookieJar jar3;
+    std::unique_ptr<ResponseHeaderAdaptor> set(new_resp("sid=abc"));
+    jar3.get_cookies_from_headers("host", set.get());
+    std::unique_ptr<ResponseHeaderAdaptor> bare2(new_resp("sid; Path=/"));
+    jar3.get_cookies_from_headers("host", bare2.get());
+    EXPECT_EQ("sid=abc", get_cookie(&jar3, "host"));
+}
+
+TEST(cookie_jar, expires_is_gmt) {
+    // Expires is a GMT date; it must not depend on the local time zone.
+    const char* old = getenv("TZ");
+    std::string saved = old ? old : "";
+    setenv("TZ", "Asia/Shanghai", 1);
+    tzset();
+    DEFER({ if (old) setenv("TZ", saved.c_str(), 1); else unsetenv("TZ"); tzset(); });
+    char date[64];
+    time_t soon = time(0) + 3600;   // one hour from now, as GMT
+    struct tm g;
+    gmtime_r(&soon, &g);
+    strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &g);
+    SimpleCookieJar jar;
+    std::string text = "sid=abc; Expires=";
+    text.append(date);
+    std::unique_ptr<ResponseHeaderAdaptor> set(new_resp(text));
+    jar.get_cookies_from_headers("host", set.get());
+    EXPECT_EQ("sid=abc", get_cookie(&jar, "host")) << date;
+}
+
 int main(int argc, char** arg) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;
