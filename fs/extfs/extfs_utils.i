@@ -239,11 +239,20 @@ static int rmdir_proc(
 }
 
 static int __parse_extfs_error(ext2_filsys fs, errcode_t err, ext2_ino_t ino, std::string &err_msg) {
+    // invalid errcode (e.g. a bare -1 from an io manager); never negate it,
+    // or the caller would mistake the positive result for a success count
+    if (err <= 0) {
+        err_msg = "invalid errcode";
+        return -EIO;
+    }
     if (err < EXT2_ET_BASE) return -err;
 
     switch (err) {
         case EXT2_ET_NO_MEMORY: case EXT2_ET_TDB_ERR_OOM:
             return -ENOMEM;
+
+        case EXT2_ET_SHORT_READ: case EXT2_ET_SHORT_WRITE:
+            return -EIO;
 
         case EXT2_ET_INVALID_ARGUMENT: case EXT2_ET_LLSEEK_FAILED:
             return -EINVAL;
