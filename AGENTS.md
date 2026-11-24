@@ -139,21 +139,31 @@ The build system sets `include/` as a public include directory for `photon_share
 
 **Framework:** Google Test (gtest). Tests include `../../test/gtest.h` which wraps `<gtest/gtest.h>` and suppresses sign-compare warnings. Some tests also include `../../test/ci-tools.h` for CI helpers.
 
-**Location:** Each module has a `test/` subdirectory (e.g., `common/test/`, `thread/test/`, `net/http/test/`). Test files are named `test_<feature>.cpp` or `test-<feature>.cpp`.
+**Location:** Each module has a `test/` subdirectory (e.g., `common/test/`, `thread/test/`, `net/http/test/`). A test file covers one component (a source file, or a cohesive group of them), not one change: `common/throttle.h` → `test_throttle.cpp`, `common/objectcachev2.h` → `test_objcache.cpp`. Name the file after the component under test, and the target after the file with dashes: `test_<component>.cpp` → target `test-<component>`.
 
-**CMake pattern:** Each `test/` directory has its own `CMakeLists.txt` following this template:
+**Adding cases is the default.** When you change or extend a component that already has a test file, add `TEST` / `TEST_F` cases to that file. Do not create a new test file for a new function, option, flag, or bug fix on an existing component.
+
+A new test file — and therefore a new ctest entry — is justified only when one of these holds:
+
+1. the component has no test file yet;
+2. the test needs a different build or registration shape: `LIBS`, `DEFS`, `INCLUDES`, or `NO_REGISTER` for perf / bench / tsan binaries that must not run under ctest;
+3. the cases must be selectable on their own because they interfere with other cases in the same binary (crash, hang, or mutate global state such as the stack allocator or the vcpu count).
+
+Do not name a test file after the defect or the change (`test-<bug>.cpp`) unless condition 3 applies. Files like `thread/test/test-sleepq-stale-idx.cpp` predate this rule.
+
+**CMake pattern:** Each `test/` directory has its own `CMakeLists.txt`. Register tests with `photon_add_test()` from `CMake/photon-test-helpers.cmake` (included by the top-level `CMakeLists.txt`); do not write the raw `add_executable` / `target_link_libraries` / `add_test` triple.
 
 ```cmake
-add_executable(test-<name> <name>.cpp)
-target_link_libraries(test-<name> PRIVATE photon_shared)
-add_test(NAME test-<name> COMMAND $<TARGET_FILE:test-<name>>)
+photon_add_test(<target> <source>... [LIBS <lib>...] [DEFS <def>...] [INCLUDES <dir>...] [NO_REGISTER])
 ```
 
+It links `photon_shared` automatically, and calls `add_test(NAME <target> ...)` unless `NO_REGISTER` is given.
+
 **To add a new test:**
-1. Create `test_foo.cpp` in the appropriate `<module>/test/` directory
+1. Find the existing test file of the component you touched and add cases there. Create `test_<component>.cpp` in `<module>/test/` only if one of the three conditions above holds
 2. Include module headers via relative paths (`"../foo.h"`) and cross-module headers via `<photon/module/header.h>`
-3. Add the three-line CMake block above to that directory's `CMakeLists.txt`
-4. Build and run: `cmake --build build -j 8 && cd build && ctest -R test-foo`
+3. For a new file, add one `photon_add_test()` line to that directory's `CMakeLists.txt`
+4. Build and run: `cmake --build build -j 8 && cd build && ctest -R test-<component>`
 
 **Test initialization:** Tests that exercise coroutine or I/O features must call `photon::init()` / `photon::fini()` in their `main()` or in a gtest fixture's `SetUp`/`TearDown`.
 
