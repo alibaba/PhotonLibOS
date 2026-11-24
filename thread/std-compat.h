@@ -194,6 +194,13 @@ public:
             m_mutex->unlock();
     }
 
+    unique_lock& operator=(const unique_lock&) = delete;
+
+    unique_lock& operator=(unique_lock&& other) noexcept {
+        unique_lock(std::move(other)).swap(*this);
+        return *this;
+    }
+
     void lock() {
         validate_lock();
         m_mutex->lock();
