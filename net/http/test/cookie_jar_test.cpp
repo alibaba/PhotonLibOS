@@ -132,9 +132,36 @@ TEST(cookie_jar, server_deletes_cookie) {
             "sid=deleted; Max-Age=-1",
             "sid=; Path=/; Max-Age=0",
             "sid=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
-            "sid=\"\"; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/"}) {
+            // Django: attribute names are matched case-sensitively, so this is
+            // deleted by Max-Age=0, not by the lowercase expires
+            "sid=\"\"; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/",
+            "sid=deleted; Max-Age=0 ; Path=/",                // 5.2: WSP around the value
+            "sid=deleted; Max-Age=-9223372036854775808",
+            "sid=deleted; Max-Age=00000000000000000000",
+            "sid=deleted; Expires=Mon, 01 Jan 1900 00:00:00 GMT",
+            "sid=deleted; Max-Age=0; Expires=Wed, 24 Nov 3040 09:55:55 GMT"}) {  // 5.3: Max-Age wins
         SimpleCookieJar jar;
         set_and_check(jar, deletion);
+    }
+}
+
+TEST(cookie_jar, ignores_invalid_expiry) {
+    // The cookie is stored, but these attributes must not make it expire.
+    for (auto header : {
+            "sid=x; Max-Age=0abc",          // 5.2.2: non-DIGIT in the value
+            "sid=x; Max-Age=x0",
+            "sid=x; Max-Age=",
+            "sid=x; Max-Age=-",
+            "sid=x; Max-Age=9223372036854775807",       // no overflow
+            "sid=x; Max-Age=99999999999999999999999",
+            "sid=x; Max-Age=000000000000000000000100",
+            "sid=x; Expires=Mon, 01 Jan 1500 00:00:00 GMT",   // 5.1.1: year < 1601
+            "sid=x; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=100",  // 5.3
+            "sid=x; Max-Age=0; Max-Age=100"}) {                // last Max-Age wins
+        SimpleCookieJar jar;
+        std::unique_ptr<ResponseHeaderAdaptor> set(new_resp(header));
+        jar.get_cookies_from_headers("host", set.get());
+        EXPECT_EQ("sid=x", get_cookie(&jar, "host")) << header;
     }
 }
 
@@ -148,6 +175,13 @@ TEST(cookie_jar, empty_value) {
     std::unique_ptr<ResponseHeaderAdaptor> bare(new_resp("sid"));
     jar2.get_cookies_from_headers("host", bare.get());
     EXPECT_EQ("", get_cookie(&jar2, "host"));
+    // the '=' must be in the first ';'-separated pair, not in a later attribute
+    SimpleCookieJar jar3;
+    std::unique_ptr<ResponseHeaderAdaptor> set(new_resp("sid=abc"));
+    jar3.get_cookies_from_headers("host", set.get());
+    std::unique_ptr<ResponseHeaderAdaptor> bare2(new_resp("sid; Path=/"));
+    jar3.get_cookies_from_headers("host", bare2.get());
+    EXPECT_EQ("sid=abc", get_cookie(&jar3, "host"));
 }
 
 TEST(cookie_jar, expires_is_gmt) {
