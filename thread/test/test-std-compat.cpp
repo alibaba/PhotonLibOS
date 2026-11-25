@@ -106,6 +106,44 @@ TEST(std, unique_lock) {
     th.join();
 }
 
+TEST(std, unique_lock_move_assign) {
+    photon_std::mutex mu1, mu2;
+
+    {
+        // assigning over an owning lock releases the old mutex
+        photon_std::unique_lock<photon_std::mutex> a(mu1);
+        photon_std::unique_lock<photon_std::mutex> b(mu2);
+        a = std::move(b);
+        ASSERT_EQ(&mu2, a.mutex());
+        ASSERT_TRUE(a.owns_lock());
+        ASSERT_EQ(nullptr, b.mutex());
+        ASSERT_FALSE(b.owns_lock());
+        ASSERT_TRUE(mu1.try_lock());
+        mu1.unlock();
+    }
+
+    {
+        // assigning from an empty lock releases the old mutex and owns nothing
+        photon_std::unique_lock<photon_std::mutex> a(mu1);
+        photon_std::unique_lock<photon_std::mutex> b(mu2, std::defer_lock);
+        a = std::move(b);
+        ASSERT_EQ(&mu2, a.mutex());
+        ASSERT_FALSE(a.owns_lock());
+        ASSERT_EQ(nullptr, b.mutex());
+        ASSERT_TRUE(mu1.try_lock());
+        mu1.unlock();
+    }
+
+    {
+        // self move-assignment is a no-op (LWG 4172)
+        photon_std::unique_lock<photon_std::mutex> a(mu1);
+        auto* pa = &a;
+        a = std::move(*pa);
+        ASSERT_EQ(&mu1, a.mutex());
+        ASSERT_TRUE(a.owns_lock());
+    }
+}
+
 TEST(std, cv) {
     photon_std::work_pool_init(8);
     DEFER(photon_std::work_pool_fini());
