@@ -572,6 +572,39 @@ TEST(http_client, chunked) {
     }
 }
 
+int chunked_handler_te(void* te, ISocketStream* sock) {
+    char recv[4096];
+    auto len = sock->recv(recv, sizeof(recv));
+    EXPECT_GT(len, 0);
+    auto resp = estring().appends("HTTP/1.1 200 ok\r\nTransfer-Encoding: ", (const char*)te,
+                                 "\r\nConnection: keep-alive\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+    auto ret = sock->write(resp.data(), resp.size());
+    EXPECT_EQ(resp.size(), ret);
+    return 0;
+}
+
+TEST(http_client, chunked_transfer_coding) {
+    for (auto te : {"chunked", "Chunked", "CHUNKED", "chunked \t", "\tChunked \t",
+                    ", chunked,, \t", "chunked\r\nTransfer-Encoding: \t,"}) {
+        auto server = new_tcp_socket_server();
+        DEFER(delete server);
+        server->set_handler({(void*)te, &chunked_handler_te});
+        ASSERT_EQ(0, server->bind_v4localhost());
+        ASSERT_EQ(0, server->listen(100));
+        server->start_loop();
+        auto client = new_http_client();
+        DEFER(delete client);
+        auto op = client->new_operation(Verb::GET, to_url(server, "/"));
+        DEFER(client->destroy_operation(op));
+        ASSERT_EQ(0, op->call());
+        EXPECT_EQ(200, op->status_code);
+        EXPECT_TRUE(op->resp.headers.chunked()) << "[" << te << "]";
+        char buf[16] = {};
+        EXPECT_EQ(5, op->resp.read(buf, sizeof(buf))) << "[" << te << "]";
+        EXPECT_STREQ("hello", buf) << "[" << te << "]";
+    }
+}
+
 int wa_test[] = {5265,
 6392,
 4623,

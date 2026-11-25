@@ -52,6 +52,158 @@ public:
 protected:
     char _buffer[BUF_CAPACITY];
 };
+<<<<<<< HEAD
+=======
+TEST(headers, send_header_terminator) {
+    RequestHeadersStored<> req(Verb::GET, "http://example.com/");
+    req.headers.content_length(0);
+    std::unique_ptr<StringSocketStream> stream(new_string_socket_stream());
+    EXPECT_EQ(0, req.send_header(stream.get()));
+    EXPECT_NE(std::string::npos, stream->output().find("\r\n\r\n"));
+}
+
+TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
+    CommonHeaders<256> source, destination;
+    ASSERT_EQ(0, source.insert("A-First", "first", 1));
+    ASSERT_EQ(0, source.insert("X-Repeated", "one", 1));
+    ASSERT_EQ(0, source.insert("x-repeated", "two", 1));
+    ASSERT_EQ(0, source.insert("Z-Last", "last", 1));
+    ASSERT_EQ(0, destination.insert("X-Repeated", "existing"));
+    auto expected = std::string(destination.serialized()) + std::string(source.serialized());
+    ASSERT_EQ(0, destination.merge(source, 1));
+    EXPECT_EQ(expected, destination.serialized());
+    auto duplicates = destination.equal_range("X-Repeated");
+    EXPECT_EQ(3, duplicates.second.i - duplicates.first.i);
+    ASSERT_TRUE(destination.value_append(" appended"));
+    EXPECT_EQ("last appended", destination["Z-Last"]);
+    EXPECT_EQ("first", destination["A-First"]);
+    auto unchanged = std::string(destination.serialized());
+    errno = 0;
+    EXPECT_EQ(-1, destination.merge(destination, 1));
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(unchanged, destination.serialized());
+
+    CommonHeaders<64> tight;
+    ASSERT_EQ(0, tight.insert("Keep", "retained"));
+    auto before = std::string(tight.serialized());
+    errno = 0;
+    EXPECT_EQ(-1, tight.merge(source, 1));
+    EXPECT_EQ(ENOBUFS, errno);
+    EXPECT_EQ(before, tight.serialized());
+    EXPECT_EQ("retained", tight["Keep"]);
+    CommonHeaders<16> empty;
+    EXPECT_EQ(0, tight.merge(empty, 1));
+
+    char parsed[128] = "X-Dup: first\r\nx-dup: second\r\n\r\n";
+    Headers input;
+    ASSERT_EQ(0, input.reset(parsed, sizeof(parsed), strlen(parsed)));
+    CommonHeaders<128> output;
+    ASSERT_EQ(0, output.merge(input, 1));
+    EXPECT_EQ("X-Dup: first\r\nx-dup: second\r\n", output.serialized());
+
+    CommonHeaders<256> seed;
+    ASSERT_EQ(0, seed.insert("X-Repeated", "existing"));
+    auto exactCapacity = seed.size() + source.serialized().size() +
+                         seed.kv_size() + source.kv_size();
+    std::vector<char> exactBuffer(exactCapacity);
+    Headers exact;
+    ASSERT_EQ(0, exact.reset(exactBuffer.data(), exactBuffer.size()));
+    ASSERT_EQ(0, exact.insert("X-Repeated", "existing"));
+    // This pins merge's aggregate capacity preflight, not kv_add's text/index
+    // boundary: merge publishes the appended text size after inserting its KVs.
+    ASSERT_EQ(0, exact.merge(source, 1));
+    EXPECT_EQ(expected, exact.serialized());
+    EXPECT_EQ(0U, exact.space_remain());
+    duplicates = exact.equal_range("X-Repeated");
+    EXPECT_EQ(3, duplicates.second.i - duplicates.first.i);
+    EXPECT_EQ("last", exact["Z-Last"]);
+    EXPECT_EQ("first", exact["A-First"]);
+
+    constexpr char parsedText[] = "X: value\r\n\r\n";
+    char parsedExactBuffer[sizeof(parsedText) - 1 + sizeof(HeadersBase::KV)];
+    memcpy(parsedExactBuffer, parsedText, sizeof(parsedText) - 1);
+    Headers parsedExact;
+    ASSERT_EQ(0, parsedExact.reset(parsedExactBuffer,
+                                  sizeof(parsedExactBuffer),
+                                  sizeof(parsedText) - 1));
+    EXPECT_EQ("X: value\r\n", parsedExact.serialized());
+    EXPECT_EQ("value", parsedExact["X"]);
+    EXPECT_EQ(0U, parsedExact.space_remain());
+
+    char parsedShortBuffer[sizeof(parsedExactBuffer) - 1];
+    memcpy(parsedShortBuffer, parsedText, sizeof(parsedText) - 1);
+    Headers parsedShort;
+    errno = 0;
+    EXPECT_EQ(-1, parsedShort.reset(parsedShortBuffer, sizeof(parsedShortBuffer),
+                                   sizeof(parsedText) - 1));
+    EXPECT_EQ(ENOBUFS, errno);
+}
+
+TEST(headers, serialized_excludes_terminator_and_partial_body) {
+    for (auto fields : {"", "Z: last\r\nA: first\r\nX-Dup: one\r\nx-dup: two\r\nEmpty: \r\n"}) {
+        for (auto body : {"", "partial-body"}) {
+            char requestBuffer[1024], responseBuffer[1024];
+            Request request(requestBuffer, sizeof(requestBuffer));
+            auto requestText = std::string("POST / HTTP/1.1\r\n") + fields + "\r\n" + body;
+            memcpy(requestBuffer, requestText.data(), requestText.size());
+            ASSERT_EQ(0, request.append_bytes(requestText.size()));
+            EXPECT_EQ(fields, request.headers.serialized());
+            EXPECT_EQ(body, request.partial_body());
+
+            Response response(responseBuffer, sizeof(responseBuffer));
+            auto responseText = std::string("HTTP/1.1 200 OK\r\n") + fields + "\r\n" + body;
+            memcpy(responseBuffer, responseText.data(), responseText.size());
+            ASSERT_EQ(0, response.append_bytes(responseText.size()));
+            EXPECT_EQ(fields, response.headers.serialized());
+            EXPECT_EQ(body, response.partial_body());
+
+            CommonHeaders<1024> copied;
+            ASSERT_EQ(0, copied.merge(response.headers, 1));
+            EXPECT_EQ(fields, copied.serialized());
+        }
+    }
+}
+
+TEST(headers, chunked_transfer_coding) {
+    for (auto te : {"chunked", "Chunked", "CHUNKED", "chunked \t", "\tchunked",
+                    "gzip, chunked", "gzip,chunked", "gzip , CHUNKED ", "chunked, ",
+                    "gzip, chunked,, \t"}) {
+        CommonHeaders<256> h;
+        ASSERT_EQ(0, h.insert("Transfer-Encoding", te));
+        EXPECT_TRUE(h.chunked()) << "[" << te << "]";
+    }
+    for (auto te : {"", " ", ",", "gzip", "chunked, gzip", "chunkedx", "xchunked",
+                    "chunked;q=1", "chun ked", "gzip chunked", "chunked gzip", "identity"}) {
+        CommonHeaders<256> h;
+        ASSERT_EQ(0, h.insert("Transfer-Encoding", te));
+        EXPECT_FALSE(h.chunked()) << "[" << te << "]";
+    }
+    CommonHeaders<256> none;
+    EXPECT_FALSE(none.chunked());
+
+    struct { const char* fields; bool chunked; } cases[] = {
+        {"Transfer-Encoding: gzip\r\ntransfer-encoding: chunked\r\n\r\n", true},
+        {"Transfer-Encoding: chunked\r\nTRANSFER-ENCODING: gzip\r\n\r\n", false},
+        {"Transfer-Encoding: chunked\r\nX: y\r\nTransfer-Encoding: \t,\r\n\r\n", true},
+        {"A: b\r\nTransfer-Encoding:\tChunked\t\r\nZ: z\r\n\r\n", true},
+    };
+    for (auto& c : cases) {
+        char buf[256];
+        auto len = strlen(c.fields);
+        memcpy(buf, c.fields, len);
+        Headers h;
+        ASSERT_EQ(0, h.reset(buf, sizeof(buf), len));
+        EXPECT_EQ(c.chunked, h.chunked()) << c.fields;
+    }
+    CommonHeaders<256> dup;
+    ASSERT_EQ(0, dup.insert("Transfer-Encoding", "chunked", 1));
+    ASSERT_EQ(0, dup.insert("Transfer-Encoding", "gzip", 1));
+    EXPECT_FALSE(dup.chunked());
+    ASSERT_EQ(0, dup.insert("Transfer-Encoding", "chunked", 1));
+    EXPECT_TRUE(dup.chunked());
+}
+
+>>>>>>> 7384e83 (fix(http): recognize chunked as the final transfer coding (#1751) (#1752))
 TEST(headers, req_header) {
     // char std_req_stream[] = "GET /targetName HTTP/1.1\r\n"
     //                          "Host: HostName\r\n"

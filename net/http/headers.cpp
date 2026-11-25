@@ -199,6 +199,24 @@ std::pair<ssize_t, ssize_t> Headers::range() const {
     return {start, end};
 }
 
+bool Headers::chunked() const {
+    static const charset ows(" \t");
+    auto r = equal_range("Transfer-Encoding");
+    estring_view coding;
+    uint16_t offset = 0;
+    for (auto i = r.first.i; i < r.second.i; i++) {
+        auto v = kv(i).second;
+        if (v.offset() < offset) continue;
+        for (auto e : (v | m_buf).split(",")) {
+            e = e.trim(ows);
+            if (e.empty()) continue;
+            coding = e;
+            offset = v.offset();
+        }
+    }
+    return coding.icmp("chunked") == 0;
+}
+
 } // namespace http
 } // namespace net
 } // namespace photon
