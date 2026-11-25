@@ -152,9 +152,6 @@ public:
         auto s = (size == -1 ? "*" : std::to_string(size));
         return insert_format("Content-Range", "bytes %llu-%llu/%s", (unsigned long long)start, (unsigned long long)end, s.c_str());
     }
-    // whether the final transfer coding is chunked (RFC 9112 §6.1), with the
-    // coding names compared case-insensitively, and the field value parsed as
-    // a list (RFC 9110 §5.6.1) that may span multiple field lines
     bool chunked() const;
 
     uint64_t content_length() const {

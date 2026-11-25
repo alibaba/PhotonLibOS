@@ -558,16 +558,15 @@ int chunked_handler_te(void* te, ISocketStream* sock) {
     auto len = sock->recv(recv, sizeof(recv));
     EXPECT_GT(len, 0);
     auto resp = estring().appends("HTTP/1.1 200 ok\r\nTransfer-Encoding: ", (const char*)te,
-                                  "\r\nConnection: keep-alive\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+                                 "\r\nConnection: keep-alive\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
     auto ret = sock->write(resp.data(), resp.size());
     EXPECT_EQ(resp.size(), ret);
     return 0;
 }
 
 TEST(http_client, chunked_transfer_coding) {
-    // issue #1750: valid Transfer-Encoding values ending in chunked must be
-    // framed by the chunked decoder, rather than read as an empty body
-    for (auto te : {"chunked", "Chunked", "CHUNKED", "chunked \t", "gzip, chunked"}) {
+    for (auto te : {"chunked", "Chunked", "CHUNKED", "chunked \t", "\tChunked \t",
+                    ", chunked,, \t", "chunked\r\nTransfer-Encoding: \t,"}) {
         auto server = new_tcp_socket_server();
         DEFER(delete server);
         server->set_handler({(void*)te, &chunked_handler_te});

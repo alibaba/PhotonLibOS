@@ -166,7 +166,6 @@ TEST(headers, serialized_excludes_terminator_and_partial_body) {
 }
 
 TEST(headers, chunked_transfer_coding) {
-    // issue #1750: the final transfer coding decides chunked framing
     for (auto te : {"chunked", "Chunked", "CHUNKED", "chunked \t", "\tchunked",
                     "gzip, chunked", "gzip,chunked", "gzip , CHUNKED ", "chunked, ",
                     "gzip, chunked,, \t"}) {
@@ -175,7 +174,7 @@ TEST(headers, chunked_transfer_coding) {
         EXPECT_TRUE(h.chunked()) << "[" << te << "]";
     }
     for (auto te : {"", " ", ",", "gzip", "chunked, gzip", "chunkedx", "xchunked",
-                    "chunked;q=1", "chun ked", "identity"}) {
+                    "chunked;q=1", "chun ked", "gzip chunked", "chunked gzip", "identity"}) {
         CommonHeaders<256> h;
         ASSERT_EQ(0, h.insert("Transfer-Encoding", te));
         EXPECT_FALSE(h.chunked()) << "[" << te << "]";
@@ -183,7 +182,6 @@ TEST(headers, chunked_transfer_coding) {
     CommonHeaders<256> none;
     EXPECT_FALSE(none.chunked());
 
-    // the list may span multiple field lines, in which the last one counts
     struct { const char* fields; bool chunked; } cases[] = {
         {"Transfer-Encoding: gzip\r\ntransfer-encoding: chunked\r\n\r\n", true},
         {"Transfer-Encoding: chunked\r\nTRANSFER-ENCODING: gzip\r\n\r\n", false},
