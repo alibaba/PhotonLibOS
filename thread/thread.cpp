@@ -506,7 +506,7 @@ namespace photon
                          background_locked {false};
 
         void wait_while(std::atomic_bool& x) {
-            while (unlikely(x.load(std::memory_order_acquire))) {
+            while (unlikely(x.load(std::memory_order_seq_cst))) {
                 do { spin_wait(); }
                 while(likely(x.load(std::memory_order_relaxed)));
             }
@@ -514,8 +514,10 @@ namespace photon
 
     public:
         void foreground_lock() {
-            // lock
-            foreground_locked.store(true, std::memory_order_release);
+            // Sequential consistency prevents StoreLoad reordering between
+            // publishing `foreground_locked` and observing `background_locked`
+            // (classic Dekker mutual exclusion with `background_try_lock`).
+            foreground_locked.store(true, std::memory_order_seq_cst);
 
             // wait if (unlikely) background locked
             wait_while(background_locked);
@@ -526,11 +528,11 @@ namespace photon
                 wait_while(foreground_locked);
 
                 // try lock
-                if (background_locked.exchange(true, std::memory_order_acquire))
+                if (background_locked.exchange(true, std::memory_order_seq_cst))
                     return false;   // avoid wait while holding the lock
 
                 // check to make sure it is still unlocked
-                if (likely(!foreground_locked.load(std::memory_order_acquire)))
+                if (likely(!foreground_locked.load(std::memory_order_seq_cst)))
                     return true;
 
                 // otherwise release lock, wait, and repeat again
@@ -643,7 +645,11 @@ namespace photon
         mutable asymmetric_spinLock* plock;
         AtomicRunQ(const RunQ& runq = RunQ()) : RunQ(runq) {
             vcpu = current->get_vcpu();
-            (plock = &vcpu->runq_lock) -> foreground_lock();
+            if (vcpu->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING) {
+                (plock = &vcpu->runq_lock) -> foreground_lock();
+            } else {
+                plock = nullptr;
+            }
         }
         mutable bool update_current = false;
         void set_current(thread* th) const {
@@ -653,7 +659,8 @@ namespace photon
         ~AtomicRunQ() {
             if (update_current)
                 *pc = current;
-            plock->foreground_unlock();
+            if (plock)
+                plock->foreground_unlock();
         }
         static void prefetch_context(thread* from, thread* to)
         {
@@ -677,6 +684,10 @@ namespace photon
             to->state = states::RUNNING;
             return {from, to};
         }
+        bool needs_defer_ready() const {
+            return (vcpu->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING) != 0 &&
+                   current->stealable();
+        }
         Switch _do_goto(thread* to) const {
             auto from = current;
             prefetch_context(from, to);
@@ -685,15 +696,35 @@ namespace photon
             set_current(to);
             return {from, to};
         }
+        Switch _do_goto_defer_ready(thread* to) const {
+            auto from = current;
+            prefetch_context(from, to);
+            // Leave `from->state == states::RUNNING` until the deferred
+            // callback executes on `to`'s stack so no stealer can resume
+            // `from` before `_photon_switch_context_defer` saves `from`'s RSP.
+            to->state = states::RUNNING;
+            set_current(to);
+            return {from, to};
+        }
         Switch goto_next() const {
             assert(!current->single());
             return _do_goto(current->next());
+        }
+        Switch goto_next_defer_ready() const {
+            assert(!current->single());
+            return _do_goto_defer_ready(current->next());
         }
         Switch try_goto(thread* th) const {
             assert(th->vcpu == vcpu);
             th->remove_from_list();
             current->insert_before(th);
             return _do_goto(th);
+        }
+        Switch try_goto_defer_ready(thread* th) const {
+            assert(th->vcpu == vcpu);
+            th->remove_from_list();
+            current->insert_before(th);
+            return _do_goto_defer_ready(th);
         }
         bool single() const {
             return current->single();
@@ -1384,20 +1415,55 @@ insert_list:
         return (states) th->state;
     }
 
+    static void mark_thread_ready(void* th_) {
+        auto th = (thread*)th_;
+        __atomic_store_n(&th->state, static_cast<uint16_t>(states::READY),
+                         __ATOMIC_RELEASE);
+    }
+
     int thread_yield()
     {
         RunQ rq;
         if_update_now();
         rq.current->error_number = 0;
-        auto sw = AtomicRunQ(rq).goto_next();
-        switch_context(sw.from, sw.to);
+        Switch sw;
+        bool defer_ready = false;
+        {
+            AtomicRunQ arq(rq);
+            // Under passive work-stealing, another vCPU may have stolen the
+            // last READY thread(s) from this vCPU's runq between idler's check
+            // and entering `thread_yield()`.
+            if (unlikely(arq.single())) {
+                return 0;
+            }
+            defer_ready = arq.needs_defer_ready();
+            sw = defer_ready ? arq.goto_next_defer_ready() : arq.goto_next();
+        }
+        if (unlikely(defer_ready)) {
+            switch_context_defer(sw.from, sw.to, &mark_thread_ready, sw.from);
+        } else {
+            switch_context(sw.from, sw.to);
+        }
         return rq.current->error_number;
     }
 
     __attribute__((noinline))
     void thread_yield_fast() {
-        auto sw = AtomicRunQ().goto_next();
-        switch_context(sw.from, sw.to);
+        Switch sw;
+        bool defer_ready = false;
+        {
+            AtomicRunQ arq;
+            if (unlikely(arq.single())) {
+                return;
+            }
+            defer_ready = arq.needs_defer_ready();
+            sw = defer_ready ? arq.goto_next_defer_ready() : arq.goto_next();
+        }
+        if (unlikely(defer_ready)) {
+            switch_context_defer(sw.from, sw.to, &mark_thread_ready, sw.from);
+        } else {
+            switch_context(sw.from, sw.to);
+        }
     }
 
     int thread_yield_to(thread* th) {
@@ -1416,14 +1482,29 @@ insert_list:
             assert(th->state == states::READY);
         } else if (unlikely(th->state != states::READY)) {
             LOG_ERROR_RETURN(EINVAL, -1, "target thread ` must be READY!", th);
-        } else if (unlikely(rq.current->next() == th)) {
-            return thread_yield();
         }
 
-        auto sw = AtomicRunQ(rq).try_goto(th);
+        Switch sw;
+        bool defer_ready = false;
+        {
+            AtomicRunQ arq(rq);
+            if (unlikely(th->vcpu != arq.vcpu || th->state != states::READY)) {
+                return 0;
+            }
+            defer_ready = arq.needs_defer_ready();
+            if (arq.current->next() == th) {
+                sw = defer_ready ? arq.goto_next_defer_ready() : arq.goto_next();
+            } else {
+                sw = defer_ready ? arq.try_goto_defer_ready(th) : arq.try_goto(th);
+            }
+        }
         if_update_now();
         rq.current->error_number = 0;
-        switch_context(sw.from, sw.to);
+        if (unlikely(defer_ready)) {
+            switch_context_defer(sw.from, sw.to, &mark_thread_ready, sw.from);
+        } else {
+            switch_context(sw.from, sw.to);
+        }
         return rq.current->error_number;
     }
 
@@ -1579,12 +1660,17 @@ insert_list:
 #endif
     }
 
+    static void do_stack_pages_gc_ready(void* arg) {
+        do_stack_pages_gc(arg);
+        mark_thread_ready(arg);
+    }
+
     int stack_pages_gc(thread* th) {
         if (!th || th->vcpu != CURRENT->vcpu)
             LOG_ERROR_RETURN(EINVAL, -1, "target thread ` must be run on CURRENT vCPU", th);
         if (th->state == RUNNING) {
-            auto next = AtomicRunQ().goto_next().to;
-            switch_context_defer(th, next, do_stack_pages_gc, th);
+            auto next = AtomicRunQ().goto_next_defer_ready().to;
+            switch_context_defer(th, next, do_stack_pages_gc_ready, th);
         } else {
             do_stack_pages_gc(th);
         }
@@ -2096,7 +2182,8 @@ insert_list:
                 continue;
             }
             DEFER(lk->unlock());
-            if ((possibly_running && th->state == states::RUNNING) ||
+            auto st = __atomic_load_n(&th->state, __ATOMIC_ACQUIRE);
+            if ((possibly_running && st != states::READY) ||
                                     !th->stealable()) {
                 // sleeping threads interrupted by another vCPU are inserted to
                 // standby q without poping from sleeping q, they can not be stolen.
@@ -2105,6 +2192,9 @@ insert_list:
                 // they are not in a sleeping q, so they are able to be stolen.
             } else {
                 auto next = th->remove_from_list();
+                if (!possibly_running) {
+                    th->state = states::READY;
+                }
                 stolen.push_back(th); count++;
                 th->vcpu->nthreads--;
                 th->vcpu = v;
@@ -2131,7 +2221,10 @@ insert_list:
             if (lk->try_lock() < 0)
                 break;  // busy -- leave it for the next scan (see ws_scan_q)
             DEFER(lk->unlock());
+            if (!th->stealable())
+                break;
             q.pop_front();
+            th->state = states::READY;
             stolen.push_back(th);
             th->vcpu->nthreads--;
             th->vcpu = v;
@@ -2171,9 +2264,16 @@ insert_list:
         RunQ rq;
         auto last_idle = now;
         auto vcpu = rq.current->get_vcpu();
+        // Evaluate `!AtomicRunQ(rq).single()` inside a helper so the temporary
+        // `AtomicRunQ` releases `vcpu->runq_lock` BEFORE `try_work_stealing`
+        // acquires `vcpu_t::vcpu_list_lock` (preventing ABBA deadlock when two
+        // vCPUs both have ACTIVE | PASSIVE work-stealing enabled).
+        auto runq_non_empty = [&rq]() {
+            return !AtomicRunQ(rq).single();
+        };
         while (vcpu->state != states::DONE) {
             while (unlikely(resume_threads_inlined(vcpu, rq) > 0) ||
-                   likely(!AtomicRunQ(rq).single())   ||
+                   likely(runq_non_empty())   ||
                    likely(try_work_stealing(vcpu))) {
                 thread_yield();
                 if (vcpu->state == states::DONE)
@@ -2221,13 +2321,13 @@ insert_list:
     }
 
     struct migrate_args {thread* th; vcpu_base* v;};
-    static int do_thread_migrate(thread* th, vcpu_base* v);
+    static int do_thread_migrate(thread* th, vcpu_base* v, bool from_running = false);
     static void do_defer_migrate(void* m_) {
         auto m = (migrate_args*)m_;
-        do_thread_migrate(m->th, m->v);
+        do_thread_migrate(m->th, m->v, true);
     }
     static int defer_migrate_current(vcpu_base* v) {
-        auto sw = AtomicRunQ().goto_next();
+        auto sw = AtomicRunQ().goto_next_defer_ready();
         migrate_args defer_arg{sw.from, v};
         switch_context_defer(sw.from, sw.to,
             &do_defer_migrate, &defer_arg);
@@ -2253,20 +2353,25 @@ insert_list:
         }
         return do_thread_migrate(th, v);
     }
-    static int do_thread_migrate(thread* th, vcpu_base* vb) {
+    static int do_thread_migrate(thread* th, vcpu_base* vb, bool from_running) {
         assert(vb != th->vcpu);
-        AtomicRunQ arq;
         SCOPED_LOCK(th->lock);
-        if (th->state != READY || th->vcpu != CURRENT->vcpu) {
-            LOG_ERROR_RETURN(EINVAL, -1,
-                "thread ` state changed during migrate", th)
-        }
-        arq.remove_from_list(th);
-        th->get_vcpu()->nthreads--;
-        th->state = STANDBY;
         auto vcpu = (vcpu_t*)vb;
-        th->vcpu = vcpu;
-        vcpu->nthreads++;
+        {
+            AtomicRunQ arq;
+            if (from_running) {
+                th->state = states::READY;
+            }
+            if (th->state != READY || th->vcpu != CURRENT->vcpu) {
+                LOG_ERROR_RETURN(EINVAL, -1,
+                    "thread ` state changed during migrate", th)
+            }
+            arq.remove_from_list(th);
+            th->get_vcpu()->nthreads--;
+            th->state = STANDBY;
+            th->vcpu = vcpu;
+            vcpu->nthreads++;
+        }
         vcpu->move_to_standbyq_atomic(th);
         return 0;
     }
