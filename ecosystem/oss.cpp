@@ -895,6 +895,8 @@ int OssClient::rename_object(std::string_view src_path,
   opts.overwrite = true;
   opts.set_mime = set_mime;
   if (do_copy_object(src_oss_url, dst_oss_url, opts) < 0) return -1;
+  // Same key: the copy succeeds, so deleting src would remove the object.
+  if (src_path == dst_path) return 0;
   return do_delete_object(src_oss_url);
 }
 
