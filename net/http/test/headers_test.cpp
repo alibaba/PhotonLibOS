@@ -165,6 +165,47 @@ TEST(headers, serialized_excludes_terminator_and_partial_body) {
     }
 }
 
+TEST(headers, chunked_transfer_coding) {
+    // issue #1750: the final transfer coding decides chunked framing
+    for (auto te : {"chunked", "Chunked", "CHUNKED", "chunked \t", "\tchunked",
+                    "gzip, chunked", "gzip,chunked", "gzip , CHUNKED ", "chunked, ",
+                    "gzip, chunked,, \t"}) {
+        CommonHeaders<256> h;
+        ASSERT_EQ(0, h.insert("Transfer-Encoding", te));
+        EXPECT_TRUE(h.chunked()) << "[" << te << "]";
+    }
+    for (auto te : {"", " ", ",", "gzip", "chunked, gzip", "chunkedx", "xchunked",
+                    "chunked;q=1", "chun ked", "identity"}) {
+        CommonHeaders<256> h;
+        ASSERT_EQ(0, h.insert("Transfer-Encoding", te));
+        EXPECT_FALSE(h.chunked()) << "[" << te << "]";
+    }
+    CommonHeaders<256> none;
+    EXPECT_FALSE(none.chunked());
+
+    // the list may span multiple field lines, in which the last one counts
+    struct { const char* fields; bool chunked; } cases[] = {
+        {"Transfer-Encoding: gzip\r\ntransfer-encoding: chunked\r\n\r\n", true},
+        {"Transfer-Encoding: chunked\r\nTRANSFER-ENCODING: gzip\r\n\r\n", false},
+        {"Transfer-Encoding: chunked\r\nX: y\r\nTransfer-Encoding: \t,\r\n\r\n", true},
+        {"A: b\r\nTransfer-Encoding:\tChunked\t\r\nZ: z\r\n\r\n", true},
+    };
+    for (auto& c : cases) {
+        char buf[256];
+        auto len = strlen(c.fields);
+        memcpy(buf, c.fields, len);
+        Headers h;
+        ASSERT_EQ(0, h.reset(buf, sizeof(buf), len));
+        EXPECT_EQ(c.chunked, h.chunked()) << c.fields;
+    }
+    CommonHeaders<256> dup;
+    ASSERT_EQ(0, dup.insert("Transfer-Encoding", "chunked", 1));
+    ASSERT_EQ(0, dup.insert("Transfer-Encoding", "gzip", 1));
+    EXPECT_FALSE(dup.chunked());
+    ASSERT_EQ(0, dup.insert("Transfer-Encoding", "chunked", 1));
+    EXPECT_TRUE(dup.chunked());
+}
+
 TEST(headers, req_header) {
     // char std_req_stream[] = "GET /targetName HTTP/1.1\r\n"
     //                          "Host: HostName\r\n"

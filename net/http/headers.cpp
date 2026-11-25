@@ -239,6 +239,34 @@ std::pair<ssize_t, ssize_t> Headers::range() const {
     return {start, end};
 }
 
+// the last non-empty element of a list, with OWS trimmed (RFC 9110 §5.6.1)
+static estring_view last_list_element(estring_view list) {
+    static const charset ows(" \t");
+    while (true) {
+        auto p = list.rfind(',');
+        auto e = list.substr(p == list.npos ? 0 : p + 1).trim(ows);
+        if (!e.empty() || p == list.npos) return e;
+        list = list.substr(0, p);
+    }
+}
+
+bool Headers::chunked() const {
+    // a list may span multiple field lines, which are sorted by key only, so
+    // their wire order is recovered from the value offsets
+    auto r = equal_range("Transfer-Encoding");
+    estring_view coding;
+    uint16_t offset = 0;
+    for (auto i = r.first.i; i < r.second.i; i++) {
+        auto v = kv(i).second;
+        auto e = last_list_element(v | m_buf);
+        if (!e.empty() && v.offset() >= offset) {
+            coding = e;
+            offset = v.offset();
+        }
+    }
+    return coding.icmp("chunked") == 0;
+}
+
 } // namespace http
 } // namespace net
 } // namespace photon
