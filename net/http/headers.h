@@ -143,9 +143,7 @@ public:
         auto s = (size == -1 ? "*" : std::to_string(size));
         return insert_format("Content-Range", "bytes %lu-%lu/%s", start, end, s.c_str());
     }
-    bool chunked() const {
-        return get_value("Transfer-Encoding") == "chunked";
-    }
+    bool chunked() const;
 
     uint64_t content_length() const {
         return estring_view(get_value("Content-Length")).to_uint64();
