@@ -141,6 +141,7 @@ public:
     unordered_map_string_key<CookieItem> m_cookies;
     int get_cookies_from_headers(Message* message)  {
         auto r = message->headers.equal_range("Set-Cookie");
+        uint64_t now = time(0);
         for (auto it = r.first; it != r.second; ++it) {
             auto Cookies = it.second();
             Parser p(Cookies);
@@ -159,10 +160,8 @@ public:
             bool Secure = false;
             char SameSite = 0;
             uint64_t expire = -1ULL;
+            uint64_t max_age_expire = -1ULL;
             estring_view Path, Domain;
-            bool has_max_age = false, has_expires = false;
-            int64_t max_age = 0;
-            uint64_t expires_at = 0;
             while(!p.is_done()) {
                 auto attr = Cookies | p.extract_until_char(';');
                 // 5.2 unparsed-attributes step 4: no '=' means an empty value
@@ -178,16 +177,15 @@ public:
                     if (v2.empty() || v2.to_int64_check(&age) != v2.size()) {
                         LOG_DEBUG("invalid integer format for 'Max-Age': ", v2);
                     } else {
-                        has_max_age = true;
-                        max_age = age;
+                        // 5.2.2 step 4: not positive means the earliest representable date
+                        max_age_expire = (age <= 0) ? 0 : sat_add(now, age);
                     }
                 } else if (k2.icmp("Expires") == 0) {
                     uint64_t t;
                     if (!parse_cookie_date(v2, &t)) {
                         LOG_DEBUG("invalid time format for 'Expires': ", v2);
                     } else {
-                        has_expires = true;
-                        expires_at = t;
+                        expire = t;
                     }
                 }
                 else if (k2.icmp("SameSite") == 0 && v2.size() > 0) SameSite = v2[0];
@@ -198,12 +196,9 @@ public:
                 else if (k2.icmp("Partitioned") == 0) Partitioned = true;
                 else LOG_DEBUG("unknown cookie attribute ", attr);
             }
-            // 5.3 step 3: Max-Age wins over Expires no matter which comes first
-            if (has_max_age)
-                // 5.2.2 step 4: not positive means the earliest representable date
-                expire = (max_age > 0) ? (uint64_t)time(0) + (uint64_t)max_age : 0;
-            else if (has_expires)
-                expire = expires_at;
+            // 5.3 step 3: Max-Age wins over Expires no matter which comes first,
+            // so it is applied after the loop rather than where it is seen
+            if (max_age_expire != -1ULL) expire = max_age_expire;
             #define LOG_DEBUG_CONTINUE(...) { LOG_DEBUG(__VA_ARGS__); continue; }
             if (!Secure) {
                 if (Partitioned)
