@@ -57,31 +57,34 @@ struct CookieItem{
 
 // RFC 6265 5.1.1: delimiter = %x09 / %x20-2F / %x3B-40 / %x5B-60 / %x7B-7E
 static bool date_delimiter(unsigned char c) {
-    return c == 0x09 || (c >= 0x20 && c <= 0x2F) || (c >= 0x3B && c <= 0x40) ||
-           (c >= 0x5B && c <= 0x60) || (c >= 0x7B && c <= 0x7E);
+    return (c == 0x09) ||
+           (c >= 0x20 && c <= 0x2F) || (c >= 0x3B && c <= 0x40) ||
+           (c >= 0x5B && c <= 0x60) || (c >= 0x7B && c <= 0x7E) ;
 }
-static bool date_digit(unsigned char c) { return c >= '0' && c <= '9'; }
-
-// non-digit = %x00-2F / %x3A-FF, i.e. anything but a DIGIT.
 // Returns the number of characters consumed, or 0 when the token does not match.
-static size_t match_digits(estring_view t, size_t least, size_t most, uint32_t* v) {
-    size_t n = 0;
-    while (n < t.size() && n < most && date_digit(t[n])) n++;
-    if (n < least || (n < t.size() && date_digit(t[n]))) return 0;
-    *v = (uint32_t)t.substr(0, n).to_uint64();
+// to_uint64_check() eats the whole digit run, so the "( non-digit *OCTET )" tail
+// of the productions needs no separate check.
+static size_t match_digits(estring_view t, size_t least, size_t most, int16_t* v) {
+    uint64_t val;
+    auto n = t.to_uint64_check(&val);
+    if (n < least || n > most) return 0;
+    *v = (int16_t)val;
     return n;
 }
 // month = ( "jan" / "feb" / ... / "dec" ) *OCTET
-static bool match_month(estring_view t, uint32_t* v) {
-    static const char* const names[] = {"jan", "feb", "mar", "apr", "may", "jun",
-                                        "jul", "aug", "sep", "oct", "nov", "dec"};
-    for (int i = 0; i < 12; i++)
-        if (t.substr(0, 3).icmp(names[i]) == 0) { *v = i + 1; return true; }
+static bool match_month(estring_view t, int16_t* v) {
+    static const char names[][4] = {"jan", "feb", "mar", "apr", "may", "jun",
+                                    "jul", "aug", "sep", "oct", "nov", "dec"};
+    for (int16_t i = 0; i < 12; i++)
+        if (t.istarts_with(names[i])) {
+            *v = i + 1;
+            return true;
+        }
     return false;
 }
 // time = hms-time ( non-digit *OCTET ), hms-time = time-field ":" time-field ":" time-field
-static bool match_time(estring_view t, uint32_t* h, uint32_t* m, uint32_t* s) {
-    uint32_t f[3];
+static bool match_time(estring_view t, int16_t* h, int16_t* m, int16_t* s) {
+    int16_t f[3];
     size_t i = 0;
     for (int k = 0; k < 3; k++) {
         auto n = match_digits(t.substr(i), 1, 2, &f[k]);
@@ -97,8 +100,7 @@ static bool match_time(estring_view t, uint32_t* h, uint32_t* m, uint32_t* s) {
 }
 // RFC 6265 5.1.1, the deliberately tolerant cookie-date parser.
 static bool parse_cookie_date(estring_view sv, uint64_t* expiry) {
-    bool f_time = false, f_day = false, f_month = false, f_year = false;
-    uint32_t hour = 0, minute = 0, second = 0, day = 0, month = 0, year = 0;
+    int16_t hour = -1, minute = -1, second = -1, day = -1, month = -1, year = -1;
     for (size_t i = 0; i < sv.size(); ) {
         while (i < sv.size() && date_delimiter(sv[i])) i++;
         size_t j = i;
@@ -106,14 +108,14 @@ static bool parse_cookie_date(estring_view sv, uint64_t* expiry) {
         if (j == i) break;
         auto token = sv.substr(i, j - i);
         i = j;
-        if (!f_time  && match_time(token, &hour, &minute, &second)) { f_time  = true; continue; }
-        if (!f_day   && match_digits(token, 1, 2, &day))            { f_day   = true; continue; }
-        if (!f_month && match_month(token, &month))                 { f_month = true; continue; }
-        if (!f_year  && match_digits(token, 2, 4, &year))           { f_year  = true; continue; }
+        if (hour  < 0 && match_time(token, &hour, &minute, &second)) continue;
+        if (day   < 0 && match_digits(token, 1, 2, &day))            continue;
+        if (month < 0 && match_month(token, &month))                 continue;
+        if (year  < 0 && match_digits(token, 2, 4, &year))           continue;
     }
     if (year >= 70 && year <= 99) year += 1900;
-    else if (year <= 69)          year += 2000;
-    if (!f_time || !f_day || !f_month || !f_year) return false;
+    else if (year >= 0 && year <= 69) year += 2000;
+    if (hour < 0 || day < 0 || month < 0 || year < 0) return false;
     if (day < 1 || day > 31 || year < 1601) return false;
     if (hour > 23 || minute > 59 || second > 59) return false;
     // step 6: fail when no such date exists, e.g. Feb 30
