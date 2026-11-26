@@ -271,6 +271,8 @@ TEST(cookie_jar, cookie_date_rejects_invalid_values) {
         {"sid=x; Expires=Thu, 01 Jan 1970 00:00:60 GMT", "sid=x", false, "5.1.1 step 5: second > 59"},
         {"sid=x; Expires=Thu, 01 Jan 19700 00:00:00 GMT", "sid=x", false, "5.1.1: year is 2*4DIGIT"},
         {"sid=x; Expires=Thu, 01 Jan 0 00:00:00 GMT", "sid=x", false, "5.1.1: year needs at least 2 digits"},
+        {"sid=x; Expires=Thu, 01 Jan 00000 00:00:00 GMT", "sid=x", false, "5.1.1: year is at most 4 digits, leading zeros do not shorten it"},
+        {"sid=x; Expires=Thu, 012 Jan 1970 00:00:00 GMT", "sid=x", false, "5.1.1: day-of-month is at most 2 digits"},
         {"sid=x; Expires=Thu, 01 Jan 1970 00x00x00 GMT", "sid=x", false, "5.1.1: hms-time needs ':' separators"},
         {"sid=x; Expires=Thu, 01 Jan 1970 00:00:000 GMT", "sid=x", false, "5.1.1: time is hms-time then a non-digit"},
         {"sid=x; Expires=Thu, 01 Jan 1970 GMT", "sid=x", false, "5.1.1 step 5: found-time is not set"},
