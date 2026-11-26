@@ -120,7 +120,7 @@ static bool parse_cookie_date(estring_view sv, uint64_t* expiry) {
     if (hour > 23 || minute > 59 || second > 59) return false;
     // step 6: fail when no such date exists, e.g. Feb 30
     static const uint8_t month_days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    uint32_t limit = month_days[month];
+    int16_t limit = month_days[month];
     if (month == 1 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)) limit = 29;
     if (day > limit) return false;
     struct tm tm = {};
