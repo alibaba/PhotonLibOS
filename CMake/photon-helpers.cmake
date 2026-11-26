@@ -87,7 +87,7 @@ macro(photon_configure_build)
         message(FATAL_ERROR "Unknown CPU architecture ${CMAKE_SYSTEM_PROCESSOR}")
     endif ()
 
-    photon_cc_options(-Werror -Wall -Wno-error=pragmas)
+    photon_cc_options(-Werror -Wall -Wsign-compare -Wno-error=pragmas)
     if (${CMAKE_CXX_COMPILER_ID} STREQUAL GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
         # Hint: -faligned-new is enabled by default after -std=c++17 (C++ only).
         add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-faligned-new>")
