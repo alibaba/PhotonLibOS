@@ -77,7 +77,7 @@ static bool match_month(estring_view t, int16_t* v) {
                                     "jul", "aug", "sep", "oct", "nov", "dec"};
     for (int16_t i = 0; i < 12; i++)
         if (t.istarts_with(names[i])) {
-            *v = i + 1;
+            *v = i;
             return true;
         }
     return false;
@@ -120,12 +120,12 @@ static bool parse_cookie_date(estring_view sv, uint64_t* expiry) {
     if (hour > 23 || minute > 59 || second > 59) return false;
     // step 6: fail when no such date exists, e.g. Feb 30
     static const uint8_t month_days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    uint32_t limit = month_days[month - 1];
-    if (month == 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)) limit = 29;
+    uint32_t limit = month_days[month];
+    if (month == 1 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)) limit = 29;
     if (day > limit) return false;
     struct tm tm = {};
     tm.tm_year = (int)year - 1900;
-    tm.tm_mon  = (int)month - 1;
+    tm.tm_mon  = (int)month;
     tm.tm_mday = (int)day;
     tm.tm_hour = (int)hour;
     tm.tm_min  = (int)minute;
