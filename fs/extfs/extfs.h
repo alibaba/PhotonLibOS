@@ -17,6 +17,9 @@ limitations under the License.
 #include <cstdint>
 #include <photon/fs/filesystem.h>
 #include <stdint.h>
+#ifdef PHOTON_ENABLE_RESIZE
+#include <ext2fs/ext2fs.h>
+#endif
 
 namespace photon {
 namespace fs {
@@ -70,7 +73,20 @@ int fsck_extfs(photon::fs::IFile *file,
                const ExtfsFsckOptions &opt = ExtfsFsckOptions());
 
 #ifdef PHOTON_ENABLE_RESIZE
-int resize_extfs(photon::fs::IFile *file, uint64_t new_size, int flags = 0);
+// Offline resize of an extfs image. Not transactional: on failure the image
+// may be partially updated; run fsck_extfs() on it or discard it.
+// new_size (in/out, in bytes):
+//   - in: the target size
+//   - out on success: the actual size, possibly rounded down to a block-group
+//     boundary
+//   - out on EXT2_ET_TOOSMALL / EXT2_ET_BLOCK_ALLOC_FAIL: the minimum size
+//     required (a lower-bound estimate)
+// flags: only RESIZE_ENABLE_64BIT and RESIZE_DISABLE_64BIT are meaningful;
+//   setting both fails with EXT2_ET_INVALID_ARGUMENT
+// returns 0 on success, otherwise the errcode_t from resize_fs() unchanged,
+//   e.g. EXT2_ET_TOOSMALL, EXT2_ET_BLOCK_ALLOC_FAIL, EXT2_ET_NO_MEMORY,
+//   EXT2_ET_BAD_MAGIC, or a positive errno (e.g. EIO) on I/O errors
+errcode_t resize_extfs(photon::fs::IFile *file, uint64_t *new_size, int flags = 0);
 #endif
 
 }
