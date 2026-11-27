@@ -195,6 +195,13 @@ public:
     void timeout_ms(uint64_t tmo) { timeout(tmo * 1000ULL); }
     void timeout_s(uint64_t tmo) { timeout(tmo * 1000ULL * 1000ULL); }
 
+    // Per-attempt cap in microseconds on connection establishment, further
+    // capped by the remaining overall timeout. -1ULL (default) adds no cap;
+    // 0 is treated as -1ULL. Does not cover DNS resolution or the origin TLS
+    // handshake, which happens on first I/O under the overall timeout.
+    void set_dial_timeout(uint64_t timeout_us) { m_dial_timeout = timeout_us; }
+    uint64_t dial_timeout() const { return m_dial_timeout; }
+
     // Max idle time in microseconds before a pooled connection is closed.
     // -1ULL (default) keeps idle connections until the peer closes them; 0 is
     // treated as -1ULL. Captured by each vCPU's built-in dialer on its first
@@ -247,6 +254,7 @@ protected:
     ProxyAuthenticator m_proxy_authenticator;
     std::string m_user_agent;
     uint64_t m_timeout = -1ULL;
+    uint64_t m_dial_timeout = -1ULL;
     uint64_t m_connection_idle_expiration = -1ULL;
     bool m_proxy = false;
     std::vector<IPAddr> m_bind_ips;

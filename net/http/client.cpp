@@ -374,12 +374,17 @@ public:
             LOG_ERROR_RETURN(ENOBUFS, ROUNDTRIP_FAILED, "no room for request header terminator");
         auto dialer = acquire_dialer();
         if (!m_dialer) t.resolver = atomic_load_resolver(&m_resolver);
-        sock.reset(dialer->dial(t, tmo.timeout()));
+        // 0 adds no cap, same as the default -1ULL
+        uint64_t dial_tmo = m_dial_timeout ? m_dial_timeout : -1ULL;
+        sock.reset(dialer->dial(t, std::min(dial_tmo, tmo.timeout())));
         if (!sock) {
             if (errno == ECONNREFUSED || errno == ENOENT)
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused");
             LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "connection failed");
         }
+        // Restore the overall timeout before any I/O: the dial budget must
+        // not cap send_header or the deferred TLS handshake.
+        sock->timeout(tmo.timeout());
         LOG_DEBUG("Sending request ` `", req.verb(), req.target());
         if (outgoing.send_header(sock.get()) < 0) {
             sock->close();
