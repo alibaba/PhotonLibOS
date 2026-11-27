@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <string>
@@ -102,6 +103,7 @@ class BasicAuthOssTest : public ::testing::Test {
   void bucket_operations();
   void copy_and_rename();
   void append_and_get();
+  void get_with_if_match();
   void multipart();
   void symlink();
   void batch_get_objects();
@@ -426,6 +428,61 @@ void BasicAuthOssTest::append_and_get() {
   ret = client->get_object_range(path, &iov2, 1, 0);
   ASSERT_EQ(ret, 4);
   ASSERT_EQ(std::string(buf2, 4), "1212");
+}
+
+void BasicAuthOssTest::get_with_if_match() {
+  auto path = get_real_test_path("get_if_match/object");
+  const std::string data = "hello if-match";
+  iovec iov{(void*)data.data(), data.size()};
+  ASSERT_EQ(client->put_object(path, &iov, 1), (ssize_t)data.size());
+
+  ObjectHeaderMeta hmeta;
+  ASSERT_EQ(client->head_object(path, hmeta), 0);
+  ASSERT_TRUE(hmeta.has_etag());
+
+  // Matching ETag: the object data is returned.
+  char buf[32] = {};
+  iovec riov{buf, data.size()};
+  ObjectGetOptions opts{.if_match = hmeta.etag};
+  auto ret = client->get_object_range(path, &riov, 1, 0, nullptr, &opts);
+  ASSERT_EQ(ret, (ssize_t)data.size());
+  EXPECT_EQ(std::string(buf, data.size()), data);
+
+  // Mismatching ETag: 412, no data transferred, errno is ESTALE.
+  char buf2[32] = {};
+  iovec riov2{buf2, data.size()};
+  ObjectGetOptions bad_opts{.if_match =
+                                "\"00000000000000000000000000000000\""};
+  ret = client->get_object_range(path, &riov2, 1, 0, nullptr, &bad_opts);
+  EXPECT_EQ(ret, -1);
+  EXPECT_EQ(errno, ESTALE);
+  EXPECT_EQ(buf2[0], '\0');
+
+  // Meta output and options together.
+  char buf3[32] = {};
+  iovec riov3{buf3, data.size()};
+  ObjectHeaderMeta gmeta;
+  ObjectGetOptions opts3{.if_match = hmeta.etag};
+  ret = client->get_object_range(path, &riov3, 1, 0, &gmeta, &opts3);
+  ASSERT_EQ(ret, (ssize_t)data.size());
+  EXPECT_EQ(gmeta.etag, hmeta.etag);
+  EXPECT_EQ(std::string(buf3, data.size()), data);
+
+  // Convenience overload taking the ETag directly.
+  char buf4[32] = {};
+  iovec riov4{buf4, data.size()};
+  ret = client->get_object_range(path, &riov4, 1, 0, hmeta.etag);
+  ASSERT_EQ(ret, (ssize_t)data.size());
+  EXPECT_EQ(std::string(buf4, data.size()), data);
+
+  // Convenience overload, mismatching ETag: errno is ESTALE.
+  char buf5[32] = {};
+  iovec riov5{buf5, data.size()};
+  ret = client->get_object_range(path, &riov5, 1, 0,
+                                 std::string("\"00000000000000000000000000000000\""));
+  EXPECT_EQ(ret, -1);
+  EXPECT_EQ(errno, ESTALE);
+  EXPECT_EQ(buf5[0], '\0');
 }
 
 void BasicAuthOssTest::multipart() {
@@ -1057,7 +1114,7 @@ void BasicAuthOssTest::request_trace() {
   char buf2[4];
   iovec iov2{buf2, sizeof(buf2)};
   ret = client->get_object_range(get_real_test_path("request_trace/missing"),
-                                 &iov2, 1, 0, nullptr, &trace);
+                                 &iov2, 1, 0, nullptr, nullptr, &trace);
   ASSERT_EQ(ret, -1);
   EXPECT_EQ(trace.http_code, 404);
   EXPECT_TRUE(!trace.request_id.empty());
@@ -1097,6 +1154,7 @@ TEST_F(BasicAuthOssTest, list_objects) { list_objects(); }
 TEST_F(BasicAuthOssTest, bucket_operations) { bucket_operations(); }
 TEST_F(BasicAuthOssTest, multipart) { multipart(); }
 TEST_F(BasicAuthOssTest, append_and_get) { append_and_get(); }
+TEST_F(BasicAuthOssTest, get_with_if_match) { get_with_if_match(); }
 TEST_F(BasicAuthOssTest, put_and_get_meta) { put_and_get_meta(); }
 TEST_F(BasicAuthOssTest, copy_and_rename) { copy_and_rename(); }
 TEST_F(BasicAuthOssTest, symlink) { symlink(); }

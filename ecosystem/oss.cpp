@@ -200,6 +200,8 @@ static int error_http_status_to_errno(int status_code) {
       return ENOENT;
     case 409:
       return ENOTSUP;
+    case 412:
+      return ESTALE;
     case 416:
       return EINVAL;
   }
@@ -391,6 +393,7 @@ class OssClientImpl : public Client {
   ssize_t get_object_range(std::string_view object, off_t offset,
                            size_t cnt, BodyReader reader,
                            ObjectHeaderMeta* meta = nullptr,
+                           ObjectGetOptions* options = nullptr,
                            RequestTrace* trace = nullptr);
 
   int batch_get_objects(std::vector<GetObjectParameters>& params,
@@ -1043,6 +1046,7 @@ int OssClient::fill_upload_response(HTTP_STACK_OP& op,
 ssize_t OssClient::get_object_range(std::string_view obj_path, off_t offset,
                                     size_t cnt, BodyReader reader,
                                     ObjectHeaderMeta* meta,
+                                    ObjectGetOptions* options,
                                     RequestTrace* trace) {
   if (cnt == 0) return 0;
   int retry_times = m_oss_options.retry_times;
@@ -1054,6 +1058,8 @@ retry:
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.url());
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard");
   op.req.headers.range(offset, offset + cnt - 1);
+  if (options && !options->if_match.empty())
+    op.req.headers.insert("If-Match", options->if_match);
   int r = sign_and_call(op, Verb::GET, oss_url, {}, invalidate_cache, trace);
   if (r < 0) {
     if (errno == EACCES && !invalidate_cache) {
