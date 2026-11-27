@@ -164,18 +164,45 @@ namespace photon
         void* tls;
     };
 
+    #define _TOKEN_CONCAT(a, b) a ## b
+    #define _TOKEN_CONCAT_(a, b) _TOKEN_CONCAT(a, b)
+
     // this function doesn't affect whether WS is enabled or not for the thread
     inline void thread_pause_work_stealing(bool flag, thread* th = CURRENT) {
         auto& flags = ((partial_thread*)th)->flags;
-        if (flag) {
-            flags |= THREAD_PAUSE_WORK_STEALING;
-        } else {
-            flags &= ~THREAD_PAUSE_WORK_STEALING;
-        }
+        auto old = __atomic_load_n(&flags, __ATOMIC_RELAXED);
+        auto next = flag ? (old | THREAD_PAUSE_WORK_STEALING)
+                         : (old & ~THREAD_PAUSE_WORK_STEALING);
+        __atomic_store_n(&flags, next, __ATOMIC_RELEASE);
     }
-    #define SCOPED_PAUSE_WORK_STEALING               \
-        thread_pause_work_stealing(true);            \
-        DEFER(thread_pause_work_stealing(false));
+
+    class scoped_pause_work_stealing {
+    public:
+        scoped_pause_work_stealing() : _th(CURRENT) {
+            auto& flags = ((partial_thread*)_th)->flags;
+            auto old = __atomic_load_n(&flags, __ATOMIC_RELAXED);
+            _saved_paused = (old & THREAD_PAUSE_WORK_STEALING) != 0;
+            if (!_saved_paused) {
+                __atomic_store_n(&flags, old | THREAD_PAUSE_WORK_STEALING,
+                                 __ATOMIC_RELEASE);
+            }
+        }
+        ~scoped_pause_work_stealing() {
+            if (!_saved_paused) {
+                auto& flags = ((partial_thread*)_th)->flags;
+                auto cur = __atomic_load_n(&flags, __ATOMIC_RELAXED);
+                __atomic_store_n(&flags, cur & ~THREAD_PAUSE_WORK_STEALING,
+                                 __ATOMIC_RELEASE);
+            }
+        }
+        scoped_pause_work_stealing(const scoped_pause_work_stealing&) = delete;
+        scoped_pause_work_stealing& operator=(const scoped_pause_work_stealing&) = delete;
+    protected:
+        thread* _th;
+        bool _saved_paused;
+    };
+    #define SCOPED_PAUSE_WORK_STEALING \
+        photon::scoped_pause_work_stealing _TOKEN_CONCAT_(__scoped_pause_ws__, __LINE__)
 
     inline vcpu_base* get_vcpu(thread* th = CURRENT) {
         auto vcpu = ((partial_thread*)th) -> vcpu;
@@ -419,9 +446,6 @@ namespace photon
     };
 
     using scoped_lock = locker<mutex>;
-
-    #define _TOKEN_CONCAT(a, b) a ## b
-    #define _TOKEN_CONCAT_(a, b) _TOKEN_CONCAT(a, b)
 
 #if __cpp_deduction_guides >= 201606
     #define SCOPED_LOCK(x, ...) photon::locker \
