@@ -75,15 +75,18 @@ ssize_t FileCacheStore::do_pwritev(const struct iovec *iov, int iovcnt, off_t of
   ssize_t ret;
   iovector_view view((iovec*)iov, iovcnt);
   auto lruEntry = iterator_->second.get();
-  photon::scoped_rwlock rl(rw_lock_, photon::RLOCK);
   if (!lruEntry->truncate_done) {
-    // May repeated ftruncate() here, but it doesn't matter
-    ret = localFile_->ftruncate(actual_size_);
-    if (ret) {
-      LOG_ERRNO_RETURN(0, -1, "failed to truncate media file: ", VALUE(ret));
+    // Must not interleave with writes: a concurrent first writer could otherwise
+    // truncate the file after another writer has written, discarding that data.
+    photon::scoped_rwlock wl(rw_lock_, photon::WLOCK);
+    if (!lruEntry->truncate_done) {
+      ret = localFile_->ftruncate(actual_size_);
+      if (ret)
+        LOG_ERRNO_RETURN(0, -1, "failed to truncate media file: ", VALUE(ret));
+      lruEntry->truncate_done = true;
     }
-    lruEntry->truncate_done = true;
   }
+  photon::scoped_rwlock rl(rw_lock_, photon::RLOCK);
   {
     ScopedRangeLock lock(rangeLock_, offset, view.sum());
     SCOPE_AUDIT_THRESHOLD(10ULL * 1000, "file:write", AU_FILEOP("", offset, ret));
