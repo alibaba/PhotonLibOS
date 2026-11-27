@@ -29,6 +29,7 @@ limitations under the License.
 #undef protected
 
 #include <thread>
+#include <functional>
 #include <gmock/gmock.h>
 #ifdef __linux__
 #include <malloc.h>
@@ -50,6 +51,7 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/thread/thread11.h>
+#include <photon/thread/workerpool.h>
 #include "../../test/gtest.h"
 #include "mock.h"
 
@@ -1296,7 +1298,7 @@ void pread_pwrite_test(IFile *target, IFile *standard) {
     EXPECT_EQ(rsize, tsize);
 }
 
-TEST(AlignedFileAdaptor, basic) {
+TEST(AlignedFile, basic) {
     IFileSystem *fs = new_localfs_adaptor("/tmp/");
     IFile *normal_file = fs->open("test_aligned_file_normal", O_RDWR | O_CREAT, 0666);
     normal_file->ftruncate(65536);
@@ -1311,19 +1313,33 @@ TEST(AlignedFileAdaptor, basic) {
     pread_pwrite_test(aligned_file_2.get(), normal_file);
 }
 
-TEST(AlignedFileAdaptor, err_situation) {
+TEST(AlignedFile, invalid_alignment) {
+    log_output = log_output_null;
+    DEFER({
+        log_output = log_output_stdout;
+    });
+
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    DEFER(delete fs);
+    IFile* underlay_file = fs->open("test_aligned_file_aligned", O_RDWR | O_CREAT, 0666);
+    ASSERT_NE(nullptr, underlay_file);
+    DEFER(delete underlay_file);
+
+    EXPECT_EQ(nullptr, new_aligned_file_adaptor(underlay_file, getpagesize() - 1, true, false));
+    EXPECT_EQ(EINVAL, errno);
+}
+
+TEST(AlignedFile, read_failure) {
     log_output = log_output_null;
     DEFER({
         log_output = log_output_stdout;
     });
     using namespace testing;
-    IFileSystem *fs = new_localfs_adaptor("/tmp/");
-    IFile *underlay_file = fs->open("test_aligned_file_aligned", O_RDWR | O_CREAT, 0666);
-    underlay_file->ftruncate(65536);
-    IFile *wrong_size_aligned_file = new_aligned_file_adaptor(underlay_file, getpagesize() - 1, true, false);
-    EXPECT_EQ(nullptr, wrong_size_aligned_file);
-    EXPECT_EQ(EINVAL, errno);
+
     PMock::MockNullFile mock_file;
+    struct stat mock_stat = {};
+    ON_CALL(mock_file, fstat(_)).WillByDefault(DoAll(SetArgPointee<0>(mock_stat), Return(0)));
     EXPECT_CALL(mock_file, pread(_, _, _))
         .Times(AtLeast(1))
         .WillOnce(Return(-1))
@@ -1331,7 +1347,10 @@ TEST(AlignedFileAdaptor, err_situation) {
         .WillOnce(Return(getpagesize()))
         .WillOnce(Return(-1))
         .WillRepeatedly(Return(-1));
-    IFile *aligned_unreadable = new_aligned_file_adaptor(&mock_file, getpagesize(), true, false);
+    IFile* aligned_unreadable = new_aligned_file_adaptor(&mock_file, getpagesize(), true, false);
+    ASSERT_NE(nullptr, aligned_unreadable);
+    DEFER(delete aligned_unreadable);
+
     char buff[4096];
     auto ret = aligned_unreadable->pread(buff, 4096, 0);
     EXPECT_EQ(-1, ret);
@@ -1362,16 +1381,610 @@ TEST(range_split_vi, special_case) {
 }
 
 TEST(AlignedFile, pwrite_at_tail) {
-    IFileSystem *fs = new_localfs_adaptor();
-    IFileSystem *afs = new_aligned_fs_adaptor(fs, 4096, true, true);
-    IFile *file = afs->open("/tmp/ease_aligned_file_test.data", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    IFileSystem* fs = new_localfs_adaptor();
+    ASSERT_NE(nullptr, fs);
+    DEFER(delete fs);
+    IFile* raw = fs->open("/tmp/ease_aligned_file_test.data", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    ASSERT_NE(nullptr, raw);
+    DEFER(delete raw);
+    IFile* file = new_aligned_file_adaptor(raw, 4096, true, false);
+    ASSERT_NE(nullptr, file);
+    DEFER(delete file);
+
     auto ret = file->pwrite("wtf", 3, 0);
     EXPECT_EQ(3, ret);
-    delete file;
-    struct stat stat;
-    afs->stat("/tmp/ease_aligned_file_test.data", &stat);
+    struct stat stat = {};
+    ASSERT_EQ(0, raw->fstat(&stat));
     EXPECT_EQ(3, stat.st_size);
-    delete afs;
+}
+
+// yields before every IO, so concurrent writers interleave deterministically
+class YieldingFile : public ForwardFile {
+public:
+    YieldingFile(IFile* file, bool ownership) : ForwardFile(file), m_ownership(ownership) { }
+    ~YieldingFile() override
+    {
+        if (m_ownership) delete m_file;
+    }
+    ssize_t pread(void* buf, size_t count, off_t offset) override
+    {
+        photon::thread_usleep(1000);
+        return m_file->pread(buf, count, offset);
+    }
+    ssize_t pwrite(const void* buf, size_t count, off_t offset) override
+    {
+        photon::thread_usleep(1000);
+        return m_file->pwrite(buf, count, offset);
+    }
+    int fstat(struct stat* buf) override
+    {
+        photon::thread_usleep(1000);
+        return m_file->fstat(buf);
+    }
+    int ftruncate(off_t length) override
+    {
+        photon::thread_usleep(1000);
+        return m_file->ftruncate(length);
+    }
+private:
+    bool m_ownership;
+};
+
+class YieldingFS : public ForwardFS {
+public:
+    explicit YieldingFS(IFileSystem* fs) : ForwardFS(fs) { }
+    IFile* open(const char* path, int flags, mode_t mode) override
+    {
+        auto file = m_fs->open(path, flags, mode);
+        return file ? new YieldingFile(file, true) : nullptr;
+    }
+    IFile* open(const char* path, int flags) override
+    {
+        auto file = m_fs->open(path, flags);
+        return file ? new YieldingFile(file, true) : nullptr;
+    }
+};
+
+TEST(AlignedFile, concurrent_pwrite_same_block) {
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    DEFER(delete fs);
+    IFile* raw = fs->open("test_aligned_concurrent_block", O_RDWR | O_CREAT | O_TRUNC, 0666);
+    ASSERT_NE(nullptr, raw);
+    DEFER(delete raw);
+    ASSERT_EQ(0, raw->ftruncate(65536));
+
+    IFile* target = new_aligned_file_adaptor(new YieldingFile(raw, false), 4096, true, true);
+    ASSERT_NE(nullptr, target);
+    DEFER(delete target);
+
+    auto write_at = [&](off_t offset, char c) {
+        std::string buf(512, c);
+        EXPECT_EQ(512, target->pwrite(buf.data(), buf.size(), offset));
+    };
+    photon::semaphore done(0);
+    photon::WorkPool pool(4, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, 0);
+    pool.async_call(new auto([&] { write_at(0, 'a'); done.signal(1); }));
+    pool.async_call(new auto([&] { write_at(1024, 'b'); done.signal(1); }));
+    ASSERT_EQ(0, done.wait(2, 30ULL * 1000 * 1000));
+
+    char buf[2048] = {};
+    ASSERT_EQ(2048, raw->pread(buf, sizeof(buf), 0));
+    for (int i = 0; i < 512; i++) EXPECT_EQ('a', buf[i]);
+    for (int i = 512; i < 1024; i++) EXPECT_EQ(0, buf[i]);
+    for (int i = 1024; i < 1536; i++) EXPECT_EQ('b', buf[i]);
+    for (int i = 1536; i < 2048; i++) EXPECT_EQ(0, buf[i]);
+}
+
+TEST(AlignedFileSystem, concurrent_pwrite_through_two_handles) {
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    DEFER(delete fs);
+    IFileSystem* afs = new_aligned_fs_adaptor(new YieldingFS(fs), 4096, true, true);
+    ASSERT_NE(nullptr, afs);
+    DEFER(delete afs);
+
+    IFile* f1 = afs->open("test_aligned_concurrent_handles", O_RDWR | O_CREAT | O_TRUNC, 0666);
+    ASSERT_NE(nullptr, f1);
+    DEFER(delete f1);
+    ASSERT_EQ(0, f1->ftruncate(65536));
+    IFile* f2 = afs->open("test_aligned_concurrent_handles", O_RDWR);
+    ASSERT_NE(nullptr, f2);
+    DEFER(delete f2);
+
+    auto write_at = [](IFile* file, off_t offset, char c) {
+        std::string buf(512, c);
+        EXPECT_EQ(512, file->pwrite(buf.data(), buf.size(), offset));
+    };
+    photon::semaphore done(0);
+    photon::WorkPool pool(4, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, 0);
+    pool.async_call(new auto([&] { write_at(f1, 0, 'c'); done.signal(1); }));
+    pool.async_call(new auto([&] { write_at(f2, 1024, 'd'); done.signal(1); }));
+    ASSERT_EQ(0, done.wait(2, 30ULL * 1000 * 1000));
+
+    char buf[2048] = {};
+    ASSERT_EQ(2048, f1->pread(buf, sizeof(buf), 0));
+    for (int i = 0; i < 512; i++) EXPECT_EQ('c', buf[i]);
+    for (int i = 1024; i < 1536; i++) EXPECT_EQ('d', buf[i]);
+}
+
+TEST(AlignedFile, concurrent_unaligned_extend) {
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    DEFER(delete fs);
+    IFile* raw = fs->open("test_aligned_concurrent_extend", O_RDWR | O_CREAT | O_TRUNC, 0666);
+    ASSERT_NE(nullptr, raw);
+    DEFER(delete raw);
+    IFile* target = new_aligned_file_adaptor(new YieldingFile(raw, false), 4096, true, true);
+    ASSERT_NE(nullptr, target);
+    DEFER(delete target);
+
+    auto write_at = [&](off_t offset, char c) {
+        std::string buf(100, c);
+        EXPECT_EQ(100, target->pwrite(buf.data(), buf.size(), offset));
+    };
+    photon::semaphore done(0);
+    photon::WorkPool pool(4, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, 0);
+    pool.async_call(new auto([&] { write_at(0, 'e'); done.signal(1); }));
+    pool.async_call(new auto([&] { write_at(8192, 'f'); done.signal(1); }));
+    ASSERT_EQ(0, done.wait(2, 30ULL * 1000 * 1000));
+
+    char buf[100];
+    ASSERT_EQ(100, raw->pread(buf, sizeof(buf), 0));
+    for (int i = 0; i < 100; i++) EXPECT_EQ('e', buf[i]);
+    ASSERT_EQ(100, raw->pread(buf, sizeof(buf), 8192));
+    for (int i = 0; i < 100; i++) EXPECT_EQ('f', buf[i]);
+    struct stat st;
+    ASSERT_EQ(0, raw->fstat(&st));
+    EXPECT_EQ(8292, st.st_size);
+}
+
+TEST(AlignedFileSystem, lock_entry_released_with_last_handle) {
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    DEFER(delete fs);
+    auto afs = new AlignedFSAdaptor(fs, 4096, true, false, nullptr);
+    ASSERT_NE(nullptr, afs);
+    DEFER(delete afs);
+
+    auto f1 = static_cast<AlignedFileAdaptor*>(
+        afs->open("test_aligned_lock_release", O_RDWR | O_CREAT | O_TRUNC, 0666));
+    ASSERT_NE(nullptr, f1);
+    auto f2 = static_cast<AlignedFileAdaptor*>(
+        afs->open("test_aligned_lock_release", O_RDWR));
+    ASSERT_NE(nullptr, f2);
+    EXPECT_EQ(&f1->m_lock->range(), &f2->m_lock->range());
+    EXPECT_EQ(1u, afs->m_lock_table->m_locks.size());
+
+    delete f1;
+    EXPECT_EQ(1u, afs->m_lock_table->m_locks.size());
+    delete f2;
+    EXPECT_EQ(0u, afs->m_lock_table->m_locks.size());
+}
+
+TEST(AlignedFileSystem, handle_outlives_fs_adaptor) {
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    DEFER(delete fs);
+
+    IFile* f = nullptr;
+    {
+        auto afs = new AlignedFSAdaptor(fs, 4096, true, false, nullptr);
+        ASSERT_NE(nullptr, afs);
+        f = afs->open("test_aligned_handle_outlives_fs", O_RDWR | O_CREAT | O_TRUNC, 0666);
+        ASSERT_NE(nullptr, f);
+        delete afs;
+    }
+
+    // the handle keeps the lock table alive after the fs adaptor is gone
+    std::string buf(100, 'x');
+    EXPECT_EQ(100, f->pwrite(buf.data(), buf.size(), 0));
+    delete f;
+}
+
+// test doubles
+
+static bool wait_for(photon::semaphore& sem, uint64_t us = 5ULL * 1000 * 1000)
+{
+    return sem.wait(1, us) == 0;
+}
+
+// pauses after the first pread that matches the watched path, so a truncating
+// operation can be attempted while the write holds its range lock
+class PausingFile : public ForwardFile_Ownership {
+public:
+    PausingFile(IFile* file, photon::semaphore& reached, photon::semaphore& resume,
+                bool& armed, bool pausing)
+        : ForwardFile_Ownership(file, true), m_reached(reached), m_resume(resume),
+          m_armed(armed), m_pausing(pausing) { }
+    ssize_t pread(void* buf, size_t count, off_t offset) override
+    {
+        auto ret = m_file->pread(buf, count, offset);
+        if (m_pausing && m_armed) {
+            m_armed = false;
+            m_reached.signal(1);
+            m_resume.wait(1, 5ULL * 1000 * 1000);
+        }
+        return ret;
+    }
+protected:
+    photon::semaphore& m_reached;
+    photon::semaphore& m_resume;
+    bool& m_armed;
+    bool m_pausing;
+};
+
+class PausingFS : public ForwardFS_Ownership {
+public:
+    photon::semaphore reached{0}, resume{0};
+    bool armed = false;
+    std::string target;     // empty matches every path
+    explicit PausingFS(IFileSystem* fs) : ForwardFS_Ownership(fs, true) { }
+    IFile* open(const char* path, int flags, mode_t mode) override
+    {
+        auto file = m_fs->open(path, flags, mode);
+        return file ? wrap(path, file) : nullptr;
+    }
+    IFile* open(const char* path, int flags) override
+    {
+        auto file = m_fs->open(path, flags);
+        return file ? wrap(path, file) : nullptr;
+    }
+protected:
+    IFile* wrap(const char* path, IFile* file)
+    {
+        bool pausing = target.empty() || target == path;
+        return new PausingFile(file, reached, resume, armed, pausing);
+    }
+};
+
+class FailingFile : public ForwardFile_Ownership {
+public:
+    enum Fault { NONE, FSTAT, PWRITE, FTRUNCATE };
+    Fault fault = NONE;
+    explicit FailingFile(IFile* file) : ForwardFile_Ownership(file, true) { }
+    int fstat(struct stat* buf) override
+    {
+        if (fault == FSTAT)
+            LOG_ERROR_RETURN(EIO, -1, "injected fstat failure");
+        return m_file->fstat(buf);
+    }
+    ssize_t pwrite(const void* buf, size_t count, off_t offset) override
+    {
+        if (fault == PWRITE)
+            LOG_ERROR_RETURN(EIO, -1, "injected pwrite failure");
+        return m_file->pwrite(buf, count, offset);
+    }
+    int ftruncate(off_t length) override
+    {
+        if (fault == FTRUNCATE)
+            LOG_ERROR_RETURN(EIO, -1, "injected ftruncate failure");
+        return m_file->ftruncate(length);
+    }
+};
+
+// fixtures
+
+class AlignedFileSystemTruncation : public testing::Test {
+public:
+    const char* path = "test_aligned_truncation.data";
+    IFileSystem* fs = nullptr;
+    PausingFS* gate = nullptr;
+    IFileSystem* afs = nullptr;
+    IFile* f = nullptr;
+
+    void SetUp() override
+    {
+        fs = new_localfs_adaptor("/tmp/");
+        ASSERT_NE(nullptr, fs);
+        gate = new PausingFS(new YieldingFS(fs));
+        afs = new_aligned_fs_adaptor(gate, 4096, false, true, nullptr);
+        ASSERT_NE(nullptr, afs);
+        f = afs->open(path, O_RDWR | O_CREAT, 0666);
+        ASSERT_NE(nullptr, f);
+        ASSERT_EQ(0, f->ftruncate(65536));
+    }
+
+    void TearDown() override
+    {
+        delete f;
+        delete afs;
+        delete fs;
+    }
+
+    // starts an unaligned write, runs `op` while it is parked inside the
+    // read-modify-write, and expects `op` to complete only after the write
+    void expect_waits_for_inflight_write(const std::function<void()>& op, off_t expected_size = 0)
+    {
+        gate->target = path;
+        gate->armed = true;
+        std::string buf(100, 'a');
+        auto w = photon::thread_enable_join(photon::thread_create11([&] {
+            EXPECT_EQ(100, f->pwrite(buf.data(), buf.size(), 1));
+        }));
+        ASSERT_TRUE(wait_for(gate->reached));
+
+        bool done = false;
+        photon::semaphore started(0);
+        auto o = photon::thread_enable_join(photon::thread_create11([&] {
+            started.signal(1);
+            op();
+            done = true;
+        }));
+        ASSERT_TRUE(wait_for(started));
+        photon::thread_usleep(1000);
+        EXPECT_FALSE(done) << "the truncating operation must wait for the write";
+
+        gate->resume.signal(1);
+        photon::thread_join(w);
+        photon::thread_join(o);
+        EXPECT_TRUE(done);
+
+        struct stat st = {};
+        ASSERT_EQ(0, f->fstat(&st));
+        EXPECT_EQ(expected_size, st.st_size);
+    }
+};
+
+TEST_F(AlignedFileSystemTruncation, ftruncate_waits_for_inflight_write)
+{
+    expect_waits_for_inflight_write([&] {
+        EXPECT_EQ(0, f->ftruncate(0));
+    });
+}
+
+TEST_F(AlignedFileSystemTruncation, path_truncate_waits_for_inflight_write)
+{
+    expect_waits_for_inflight_write([&] {
+        EXPECT_EQ(0, afs->truncate(path, 0));
+    });
+}
+
+TEST_F(AlignedFileSystemTruncation, fallocate_waits_for_inflight_write)
+{
+    expect_waits_for_inflight_write([&] {
+        EXPECT_EQ(0, f->fallocate(0, 0, 131072));
+    }, 131072);
+}
+
+TEST(AlignedFileSystem, aliases_get_separate_locks) {
+    // locks are keyed by path, so an alias of the same file is not serialized
+    // against the original path; this documents the known limitation
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    DEFER(delete fs);
+    IFileSystem* afs = new_aligned_fs_adaptor(fs, 4096, false, false, nullptr);
+    ASSERT_NE(nullptr, afs);
+    DEFER(delete afs);
+
+    const char* path = "test_aligned_alias.data";
+    const char* dot = "./test_aligned_alias.data";
+    IFile* f1 = afs->open(path, O_RDWR | O_CREAT, 0666);
+    ASSERT_NE(nullptr, f1);
+    DEFER(delete f1);
+    IFile* f2 = afs->open(dot, O_RDWR);
+    ASSERT_NE(nullptr, f2);
+    DEFER(delete f2);
+    EXPECT_NE(&static_cast<AlignedFileAdaptor*>(f1)->m_lock->range(),
+              &static_cast<AlignedFileAdaptor*>(f2)->m_lock->range());
+}
+
+TEST(AlignedFile, write_errors_are_reported) {
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    DEFER(delete fs);
+    IFile* raw = fs->open("test_aligned_errors.data", O_RDWR | O_CREAT, 0666);
+    ASSERT_NE(nullptr, raw);
+    ASSERT_EQ(0, raw->ftruncate(0));
+    ASSERT_EQ(0, raw->ftruncate(65536));
+    FailingFile* faulty = new FailingFile(raw);
+    IFile* f = new_aligned_file_adaptor(faulty, 4096, false, true);
+    ASSERT_NE(nullptr, f);
+    DEFER(delete f);
+    char buf[100] = {};
+
+    faulty->fault = FailingFile::FSTAT;
+    errno = 0;
+    EXPECT_EQ(-1, f->pwrite(buf, sizeof(buf), 1));
+    EXPECT_EQ(EIO, errno);
+
+    faulty->fault = FailingFile::PWRITE;
+    errno = 0;
+    EXPECT_EQ(-1, f->pwrite(buf, sizeof(buf), 1));
+    EXPECT_EQ(EIO, errno);
+
+    faulty->fault = FailingFile::FTRUNCATE;
+    ASSERT_EQ(0, raw->ftruncate(0));
+    errno = 0;
+    EXPECT_EQ(-1, f->pwrite(buf, sizeof(buf), 1));
+    EXPECT_EQ(EIO, errno);
+
+    faulty->fault = FailingFile::NONE;
+    EXPECT_EQ(100, f->pwrite(buf, sizeof(buf), 1));
+}
+
+TEST(AlignedFile, pread_is_not_blocked_by_write) {
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    PausingFS gate(fs);
+    const char* path = "test_aligned_pread_unblocked.data";
+    gate.target = path;
+    IFile* raw = gate.open(path, O_RDWR | O_CREAT, 0666);
+    ASSERT_NE(nullptr, raw);
+    ASSERT_EQ(0, raw->ftruncate(65536));
+    IFile* f = new_aligned_file_adaptor(raw, 4096, false, true);
+    ASSERT_NE(nullptr, f);
+    DEFER(delete f);
+
+    gate.armed = true;
+    std::string wbuf(100, 'a');
+    auto w = photon::thread_enable_join(photon::thread_create11([&] {
+        EXPECT_EQ(100, f->pwrite(wbuf.data(), wbuf.size(), 1));
+    }));
+    ASSERT_TRUE(wait_for(gate.reached));
+
+    bool read_done = false;
+    char rbuf[100] = {};
+    auto r = photon::thread_enable_join(photon::thread_create11([&] {
+        EXPECT_EQ(100, f->pread(rbuf, sizeof(rbuf), 1));
+        read_done = true;
+    }));
+    for (int i = 0; i < 2000 && !read_done; i++)
+        photon::thread_usleep(1000);
+    EXPECT_TRUE(read_done) << "pread must not wait for the write lock";
+
+    gate.resume.signal(1);
+    photon::thread_join(w);
+    photon::thread_join(r);
+}
+
+TEST(AlignedFile, vector_write_waits_for_scalar_write) {
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    PausingFS gate(fs);
+    const char* path = "test_aligned_vector_vs_scalar.data";
+    gate.target = path;
+    IFile* raw = gate.open(path, O_RDWR | O_CREAT, 0666);
+    ASSERT_NE(nullptr, raw);
+    ASSERT_EQ(0, raw->ftruncate(65536));
+    IFile* f = new_aligned_file_adaptor(raw, 4096, false, true);
+    ASSERT_NE(nullptr, f);
+    DEFER(delete f);
+
+    gate.armed = true;
+    std::string wbuf(100, 'a');
+    auto w = photon::thread_enable_join(photon::thread_create11([&] {
+        EXPECT_EQ(100, f->pwrite(wbuf.data(), wbuf.size(), 1));
+    }));
+    ASSERT_TRUE(wait_for(gate.reached));
+
+    bool vec_done = false;
+    photon::semaphore vec_started(0);
+    std::string vbuf(100, 'b');
+    iovec iov[2] = {{&vbuf[0], 50}, {&vbuf[0] + 50, 50}};
+    auto v = photon::thread_enable_join(photon::thread_create11([&] {
+        vec_started.signal(1);
+        EXPECT_EQ(100, f->pwritev(iov, 2, 200));
+        vec_done = true;
+    }));
+    ASSERT_TRUE(wait_for(vec_started));
+    photon::thread_usleep(1000);
+    EXPECT_FALSE(vec_done) << "pwritev must wait for a conflicting scalar write";
+
+    gate.resume.signal(1);
+    photon::thread_join(w);
+    photon::thread_join(v);
+    EXPECT_TRUE(vec_done);
+
+    char buf[100] = {};
+    ASSERT_EQ(100, f->pread(buf, sizeof(buf), 1));
+    for (int i = 0; i < 100; i++) EXPECT_EQ('a', buf[i]);
+    ASSERT_EQ(100, f->pread(buf, sizeof(buf), 200));
+    for (int i = 0; i < 100; i++) EXPECT_EQ('b', buf[i]);
+}
+
+TEST(AlignedFile, lock_range_allows_adjacent_write) {
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    PausingFS gate(fs);
+    const char* path = "test_aligned_lock_range.data";
+    gate.target = path;
+    IFile* raw = gate.open(path, O_RDWR | O_CREAT, 0666);
+    ASSERT_NE(nullptr, raw);
+    ASSERT_EQ(0, raw->ftruncate(65536));
+    IFile* f = new_aligned_file_adaptor(raw, 4096, false, true);
+    ASSERT_NE(nullptr, f);
+    DEFER(delete f);
+
+    // ends on a block boundary, so the lock covers [0, 4096) only
+    gate.armed = true;
+    std::string abuf(4095, 'a');
+    auto a = photon::thread_enable_join(photon::thread_create11([&] {
+        EXPECT_EQ(4095, f->pwrite(abuf.data(), abuf.size(), 1));
+    }));
+    ASSERT_TRUE(wait_for(gate.reached));
+
+    bool adjacent_done = false;
+    photon::semaphore adjacent_started(0);
+    std::string adjacent(4096, 'b');
+    auto t1 = photon::thread_enable_join(photon::thread_create11([&] {
+        adjacent_started.signal(1);
+        EXPECT_EQ(4096, f->pwrite(adjacent.data(), adjacent.size(), 4096));
+        adjacent_done = true;
+    }));
+    ASSERT_TRUE(wait_for(adjacent_started));
+    for (int i = 0; i < 2000 && !adjacent_done; i++)
+        photon::thread_usleep(1000);
+    EXPECT_TRUE(adjacent_done) << "an adjacent aligned write must not wait";
+
+    bool overlap_done = false;
+    photon::semaphore overlap_started(0);
+    std::string overlap(4096, 'c');
+    auto t2 = photon::thread_enable_join(photon::thread_create11([&] {
+        overlap_started.signal(1);
+        EXPECT_EQ(4096, f->pwrite(overlap.data(), overlap.size(), 0));
+        overlap_done = true;
+    }));
+    ASSERT_TRUE(wait_for(overlap_started));
+    photon::thread_usleep(1000);
+    EXPECT_FALSE(overlap_done) << "an overlapping aligned write must wait";
+
+    gate.resume.signal(1);
+    photon::thread_join(a);
+    photon::thread_join(t1);
+    photon::thread_join(t2);
+
+    char buf[4096] = {};
+    ASSERT_EQ(4096, f->pread(buf, sizeof(buf), 4096));
+    for (int i = 0; i < 4096; i++) EXPECT_EQ('b', buf[i]);
+    ASSERT_EQ(4096, f->pread(buf, sizeof(buf), 0));
+    for (int i = 0; i < 4096; i++) EXPECT_EQ('c', buf[i]);
+}
+
+TEST(AlignedFileSystem, different_files_write_concurrently) {
+    IFileSystem* fs = new_localfs_adaptor("/tmp/");
+    ASSERT_NE(nullptr, fs);
+    DEFER(delete fs);
+    PausingFS* gate = new PausingFS(new YieldingFS(fs));
+    DEFER(delete gate);
+    IFileSystem* afs = new_aligned_fs_adaptor(gate, 4096, false, false, nullptr);
+    ASSERT_NE(nullptr, afs);
+    DEFER(delete afs);
+
+    IFile* a = afs->open("test_aligned_conc_a", O_RDWR | O_CREAT, 0666);
+    ASSERT_NE(nullptr, a);
+    DEFER(delete a);
+    IFile* b = afs->open("test_aligned_conc_b", O_RDWR | O_CREAT, 0666);
+    ASSERT_NE(nullptr, b);
+    DEFER(delete b);
+    ASSERT_EQ(0, a->ftruncate(65536));
+    ASSERT_EQ(0, b->ftruncate(65536));
+    EXPECT_NE(&static_cast<AlignedFileAdaptor*>(a)->m_lock->range(),
+              &static_cast<AlignedFileAdaptor*>(b)->m_lock->range());
+
+    gate->target = "test_aligned_conc_a";
+    gate->armed = true;
+    std::string sa(100, 'a'), sb(100, 'b');
+    auto t1 = photon::thread_enable_join(photon::thread_create11([&] {
+        EXPECT_EQ(100, a->pwrite(sa.data(), sa.size(), 1));
+    }));
+    ASSERT_TRUE(wait_for(gate->reached));
+
+    bool b_done = false;
+    photon::semaphore b_started(0);
+    auto t2 = photon::thread_enable_join(photon::thread_create11([&] {
+        b_started.signal(1);
+        EXPECT_EQ(100, b->pwrite(sb.data(), sb.size(), 1));
+        b_done = true;
+    }));
+    ASSERT_TRUE(wait_for(b_started));
+    for (int i = 0; i < 2000 && !b_done; i++)
+        photon::thread_usleep(1000);
+    EXPECT_TRUE(b_done) << "writes to different files must not serialize";
+
+    gate->resume.signal(1);
+    photon::thread_join(t1);
+    photon::thread_join(t2);
 }
 
 inline static void SetupTestDir(const std::string& dir) {

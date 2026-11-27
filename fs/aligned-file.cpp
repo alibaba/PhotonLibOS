@@ -19,7 +19,11 @@ limitations under the License.
 #include <stdlib.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <map>
+#include <memory>
+#include <string>
 #include <photon/common/iovector.h>
+#include <photon/common/range-lock.h>
 #include "filesystem.h"
 #include "forwardfs.h"
 #include "range-split.h"
@@ -33,16 +37,84 @@ namespace fs
 {
     static constexpr size_t MAX_TMP_IOVEC_SIZE=32;
 
+    class AlignedFileLockTable;
+
+    // RangeLock of an opened file, plus the table entry that owns its lifetime.
+    // A directly constructed adaptor creates its own lock without a table.
+    class AlignedFileLock
+    {
+    public:
+        static std::shared_ptr<AlignedFileLock> create()
+        {
+            return std::make_shared<AlignedFileLock>(std::make_shared<::RangeLock>(),
+                                                     nullptr, std::string());
+        }
+        AlignedFileLock(std::shared_ptr<::RangeLock> lock,
+                        std::shared_ptr<AlignedFileLockTable> table, std::string path)
+            : m_lock(std::move(lock)), m_table(std::move(table)), m_path(std::move(path)) { }
+        ~AlignedFileLock();
+        ::RangeLock& range() { return *m_lock; }
+    protected:
+        std::shared_ptr<::RangeLock> m_lock;
+        std::shared_ptr<AlignedFileLockTable> m_table;  // null if self-owned
+        std::string m_path;
+    };
+
+    // Locks shared by the handles opened from one fs adaptor, keyed by path;
+    // hard links and other aliases of the same file get separate locks.
+    // The last handle of a path drops its entry.
+    class AlignedFileLockTable : public std::enable_shared_from_this<AlignedFileLockTable>
+    {
+    public:
+        std::shared_ptr<AlignedFileLock> acquire(const char* path)
+        {
+            SCOPED_LOCK(m_lock);
+            auto& entry = m_locks[std::string(path)];
+            entry.refs++;
+            if (!entry.lock)
+                entry.lock = std::make_shared<::RangeLock>();
+            return std::make_shared<AlignedFileLock>(entry.lock, shared_from_this(), path);
+        }
+        void release(const std::string& path)
+        {
+            SCOPED_LOCK(m_lock);
+            auto it = m_locks.find(path);
+            if (it == m_locks.end())
+                return;
+            if (--it->second.refs == 0)
+                m_locks.erase(it);
+        }
+    protected:
+        struct Entry
+        {
+            std::shared_ptr<::RangeLock> lock;
+            uint32_t refs = 0;
+        };
+        photon::spinlock m_lock;
+        std::map<std::string, Entry> m_locks;
+    };
+
+    inline AlignedFileLock::~AlignedFileLock()
+    {
+        if (m_table)
+            m_table->release(m_path);
+    }
+
     class AlignedFileAdaptor : public ForwardFile_Ownership
     {
     public:
         uint32_t m_alignment;
         bool m_align_memory;
         IOAlloc m_allocator;
+        // a partially aligned write rewrites the whole aligned range, so all
+        // write-like ops are serialized by range
+        std::shared_ptr<AlignedFileLock> m_lock;
 
         AlignedFileAdaptor(IFile *underlay_file, uint32_t alignment, bool align_memory,
-                           bool ownership, IOAlloc *allocator)
-            : ForwardFile_Ownership(underlay_file, ownership)
+                           bool ownership, IOAlloc *allocator,
+                           std::shared_ptr<AlignedFileLock> lock = nullptr)
+            : ForwardFile_Ownership(underlay_file, ownership),
+              m_lock(lock ? std::move(lock) : AlignedFileLock::create())
         {
             // if no allocator specified, initialized by align_memory
             if (allocator == nullptr) {
@@ -87,11 +159,18 @@ namespace fs
         {
             if (count == 0) return 0;
             range_split_power2 rs(offset, count, m_alignment);
-            if (rs.is_aligned() && (!m_align_memory || rs.is_aligned_ptr(buf)))
+            bool aligned = rs.is_aligned() && (!m_align_memory || rs.is_aligned_ptr(buf));
+            // exclude any write touching the rewritten range; a tail write may
+            // also shrink the file back, so it excludes the whole tail
+            ScopedRangeLock guard(m_lock->range(),
+                aligned ? (uint64_t)offset : rs.aligned_begin_offset(),
+                aligned ? (uint64_t)count : (rs.end_remainder ? -1ULL : rs.aligned_length()));
+            if (aligned)
                 return m_file->pwrite(buf, count, offset);
 
             struct stat stat;
-            m_file->fstat(&stat);
+            if (m_file->fstat(&stat) < 0)
+                LOG_ERRNO_RETURN(0, -1, "failed to fstat [`]", m_file);
             ssize_t filesize = stat.st_size;
             auto suppose_filesize = (offset + (ssize_t)count) > filesize ? offset + count: filesize;
             auto ptr = mem_alloc(rs.aligned_length());
@@ -125,13 +204,16 @@ namespace fs
 
             memcpy((char*)ptr + rs.begin_remainder, buf, count);
             auto actual_write = m_file->pwrite(ptr, rs.aligned_length(), rs.aligned_begin_offset());
+            if (actual_write < 0)
+                LOG_ERRNO_RETURN(0, -1, "failed to pwrite [`], count=`, offset=`",
+                                 m_file, rs.aligned_length(), rs.aligned_begin_offset());
             auto current_tail = rs.aligned_begin_offset() + actual_write;
             if ((ssize_t)current_tail < offset)
-                return -1; // failed to write
+                LOG_ERROR_RETURN(EIO, -1, "short write stops before the requested offset");
             auto count_write = current_tail - offset >= count ? count : current_tail - offset;
-            if (suppose_filesize < current_tail) { // that means have written more than needs
-                m_file->ftruncate(suppose_filesize);
-            }
+            if (suppose_filesize < current_tail) // that means have written more than needs
+                if (m_file->ftruncate(suppose_filesize) < 0)
+                    LOG_ERRNO_RETURN(0, -1, "failed to shrink [`] back to `", m_file, suppose_filesize);
             return count_write;
         }
         virtual ssize_t preadv(const struct iovec *iov, int iovcnt, off_t offset) override {
@@ -196,11 +278,16 @@ namespace fs
             auto count = buf.sum();
             if (count == 0) return 0;
             range_split_power2 rs(offset, count, m_alignment);
-            if (rs.is_aligned() && (!m_align_memory || iov_align_check(buf)))
+            bool aligned = rs.is_aligned() && (!m_align_memory || iov_align_check(buf));
+            ScopedRangeLock guard(m_lock->range(),
+                aligned ? (uint64_t)offset : rs.aligned_begin_offset(),
+                aligned ? (uint64_t)count : (rs.end_remainder ? -1ULL : rs.aligned_length()));
+            if (aligned)
                 return m_file->pwritev2_mutable(iov, iovcnt, offset, flags);
 
             struct stat stat;
-            m_file->fstat(&stat);
+            if (m_file->fstat(&stat) < 0)
+                LOG_ERRNO_RETURN(0, -1, "failed to fstat [`]", m_file);
             ssize_t filesize = stat.st_size;
             auto suppose_filesize = (offset + (ssize_t)count) > filesize ? offset + count: filesize;
             IOVector wbuf(m_allocator);
@@ -248,11 +335,15 @@ namespace fs
             ret = view.memcpy_from(&buf, count);
             assert(ret == count);
             auto actual_write = m_file->pwritev2_mutable(wbuf.iovec(), wbuf.iovcnt(), rs.aligned_begin_offset(), flags);
+            if (actual_write < 0)
+                LOG_ERRNO_RETURN(0, -1, "failed to pwritev2 [`], count=`, offset=`",
+                                 m_file, rs.aligned_length(), rs.aligned_begin_offset());
             auto current_tail = rs.aligned_begin_offset() + actual_write;
             if ((ssize_t)current_tail < offset)
-                LOG_ERRNO_RETURN(0, -1, "failed to pwritev2");
+                LOG_ERROR_RETURN(EIO, -1, "short vector write stops before the requested offset");
             if (suppose_filesize < current_tail) { // that means have written more than needs
-                m_file->ftruncate(suppose_filesize);
+                if (m_file->ftruncate(suppose_filesize) < 0)
+                    LOG_ERRNO_RETURN(0, -1, "failed to shrink [`] back to `", m_file, suppose_filesize);
                 current_tail = suppose_filesize;
             } else { // means pwrite will not extend file
 
@@ -262,6 +353,17 @@ namespace fs
                 count_write = count;
             return count_write;
 
+        }
+        virtual int ftruncate(off_t length) override
+        {
+            // must not interleave with the read-modify-write above
+            ScopedRangeLock guard(m_lock->range(), 0, -1ULL);
+            return m_file->ftruncate(length);
+        }
+        virtual int fallocate(int mode, off_t offset, off_t len) override
+        {
+            ScopedRangeLock guard(m_lock->range(), 0, -1ULL);
+            return m_file->fallocate(mode, offset, len);
         }
     };
 
@@ -273,12 +375,21 @@ namespace fs
         uint32_t m_alignment;
         bool m_align_memory;
         IOAlloc *m_allocator;
+        // one lock per path, shared by all handles opened from this fs adaptor
+        std::shared_ptr<AlignedFileLockTable> m_lock_table = std::make_shared<AlignedFileLockTable>();
+
         AlignedFSAdaptor(IFileSystem* underlay_fs, uint32_t alignment, bool align_memory, bool ownership, IOAlloc* allocator):
             ForwardFS_Ownership(underlay_fs, ownership),
             m_alignment(alignment),
             m_align_memory(align_memory),
             m_allocator(allocator)
         {
+        }
+        virtual int truncate(const char* path, off_t length) override
+        {
+            auto lock = m_lock_table->acquire(path);
+            ScopedRangeLock guard(lock->range(), 0, -1ULL);
+            return m_fs->truncate(path, length);
         }
         virtual IFile* open(const char* path, int flags, mode_t mode) override {
             auto file = m_fs->open(path, flags, mode);
@@ -289,7 +400,8 @@ namespace fs
                 m_alignment,
                 m_align_memory,
                 true,
-                m_allocator
+                m_allocator,
+                m_lock_table->acquire(path)
             );
         }
         virtual IFile* open(const char* path, int flags) override {
@@ -301,7 +413,8 @@ namespace fs
                 m_alignment,
                 m_align_memory,
                 true,
-                m_allocator
+                m_allocator,
+                m_lock_table->acquire(path)
             );
         }
     };
