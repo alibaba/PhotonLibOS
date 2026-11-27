@@ -12,6 +12,7 @@ photon_add_test(test-multi-vcpu-locking test-multi-vcpu-locking.cpp)
 photon_add_test(test-pooled-stack-allocator test-pooled-stack-allocator.cpp)
 photon_add_test(test-global-stack-pool test-global-stack-pool.cpp)
 photon_add_test(bench-stack-allocator bench-stack-allocator.cpp NO_REGISTER)
+photon_add_test(bench-thread bench-thread.cpp NO_REGISTER)
 photon_add_test(tsan-stack-pool tsan-stack-pool.cpp NO_REGISTER)
 
 photon_add_test(test-st-utest st_utest.cpp st_utest_tcp.cpp st_utest_coroutines.cpp)

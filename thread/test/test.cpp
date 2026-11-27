@@ -38,6 +38,12 @@ limitations under the License.
 
 #include <photon/common/lockfree_queue.h>
 
+static void invoke_scoped_pause_outside_photon_ns(void (*fn)(void*), void* arg) {
+    SCOPED_PAUSE_WORK_STEALING;
+    if (fn)
+        fn(arg);
+}
+
 using namespace std;
 using namespace photon;
 
@@ -2682,6 +2688,366 @@ TEST(WorkStealing, active_passive_mutual_stealing) {
         thread_join((join_handle*)ths[i]);
     EXPECT_GT(hops.load(std::memory_order_relaxed), 0U);
     EXPECT_GT(mutual_hops.load(std::memory_order_relaxed), 0U);
+}
+
+// Nested SCOPED_PAUSE_WORK_STEALING scopes (and an inner SCOPED_PAUSE_WORK_STEALING
+// inside an outer thread_pause_work_stealing(true), as happens when I/O engines
+// use SCOPED_PAUSE_WORK_STEALING internally) must restore the prior pause bit
+// rather than unconditionally clearing it on inner scope exit.
+TEST(WorkStealing, nested_scoped_pause_work_stealing) {
+    auto main_vcpu = photon::get_vcpu();
+
+    // Case 1: nested SCOPED_PAUSE_WORK_STEALING scopes (including a helper
+    // compiled outside `namespace photon`).
+    {
+        struct NestedCtx {
+            photon::thread* self = nullptr;
+            std::atomic<int> phase{0};
+            std::atomic<bool> release_outer{false};
+            std::atomic<bool> done{false};
+            uint32_t flags_after_inner = 0;
+            vcpu_base* vcpu_after_inner = nullptr;
+            vcpu_base* vcpu_after_outer = nullptr;
+        } ctx;
+
+        auto th = thread_create(+[](void* arg) -> void* {
+            auto c = (NestedCtx*)arg;
+            {
+                SCOPED_PAUSE_WORK_STEALING;
+                invoke_scoped_pause_outside_photon_ns(
+                    +[](void*) {
+                        SCOPED_PAUSE_WORK_STEALING;
+                        photon::thread_yield();
+                    },
+                    nullptr);
+                c->flags_after_inner = ((partial_thread*)c->self)->flags;
+                c->phase.store(1, std::memory_order_release);
+                while (!c->release_outer.load(std::memory_order_acquire))
+                    photon::thread_yield();
+                c->vcpu_after_inner = load_thread_vcpu(c->self);
+            }
+            c->phase.store(2, std::memory_order_release);
+            photon::thread_yield();
+            c->vcpu_after_outer = load_thread_vcpu(c->self);
+            c->done.store(true, std::memory_order_release);
+            return nullptr;
+        }, &ctx, 0, 0, THREAD_ENABLE_WORK_STEALING | THREAD_JOINABLE);
+        ASSERT_NE(nullptr, th);
+        ctx.self = th;
+        DEFER({
+            ctx.release_outer.store(true, std::memory_order_release);
+            wait_sched([&] { return ctx.done.load(std::memory_order_acquire); }, 5000);
+            thread_join((join_handle*)th);
+        });
+
+        ASSERT_TRUE(wait_sched([&] { return ctx.phase.load(std::memory_order_acquire) == 1; }, 1000));
+        EXPECT_NE(0U, ctx.flags_after_inner & THREAD_PAUSE_WORK_STEALING);
+
+        FastStealerVCpu stealer;
+        // Block main_vcpu while th is READY inside the outer scope (after inner exited):
+        // th must NOT be stolen.
+        for (int i = 0; i < 100; i++) {
+            ::usleep(1000);
+            ASSERT_EQ(main_vcpu, load_thread_vcpu(th));
+        }
+
+        ctx.release_outer.store(true, std::memory_order_release);
+        // Schedule until outer scope exits (phase == 2), then block main_vcpu so
+        // stealer steals th now that the outer scope has restored pause=false.
+        while (ctx.phase.load(std::memory_order_acquire) < 2)
+            photon::thread_yield();
+        EXPECT_EQ(main_vcpu, ctx.vcpu_after_inner);
+        ASSERT_TRUE(wait_blocked([&] { return ctx.done.load(std::memory_order_acquire); }, 5000));
+        EXPECT_EQ(stealer.vcpu, ctx.vcpu_after_outer);
+        EXPECT_EQ(0U, ((partial_thread*)th)->flags & THREAD_PAUSE_WORK_STEALING);
+    }
+
+    // Case 2: explicit thread_pause_work_stealing(true) + inner SCOPED_PAUSE_WORK_STEALING.
+    {
+        struct ManualOuterCtx {
+            photon::thread* self = nullptr;
+            std::atomic<bool> inner_done{false};
+            std::atomic<bool> unpause{false};
+            std::atomic<bool> done{false};
+            uint32_t flags_after_inner = 0;
+            vcpu_base* final_vcpu = nullptr;
+        } ctx;
+
+        auto th = thread_create(+[](void* arg) -> void* {
+            auto c = (ManualOuterCtx*)arg;
+            thread_pause_work_stealing(true);
+            {
+                SCOPED_PAUSE_WORK_STEALING;
+                photon::thread_yield();
+            }
+            c->flags_after_inner = ((partial_thread*)c->self)->flags;
+            c->inner_done.store(true, std::memory_order_release);
+            while (!c->unpause.load(std::memory_order_acquire))
+                photon::thread_yield();
+            thread_pause_work_stealing(false);
+            photon::thread_yield();
+            c->final_vcpu = load_thread_vcpu(c->self);
+            c->done.store(true, std::memory_order_release);
+            return nullptr;
+        }, &ctx, 0, 0, THREAD_ENABLE_WORK_STEALING | THREAD_JOINABLE);
+        ASSERT_NE(nullptr, th);
+        ctx.self = th;
+        DEFER({
+            ctx.unpause.store(true, std::memory_order_release);
+            wait_sched([&] { return ctx.done.load(std::memory_order_acquire); }, 5000);
+            thread_join((join_handle*)th);
+        });
+
+        ASSERT_TRUE(wait_sched([&] { return ctx.inner_done.load(std::memory_order_acquire); }, 1000));
+        EXPECT_NE(0U, ctx.flags_after_inner & THREAD_PAUSE_WORK_STEALING);
+
+        FastStealerVCpu stealer;
+        for (int i = 0; i < 100; i++) {
+            ::usleep(1000);
+            ASSERT_EQ(main_vcpu, load_thread_vcpu(th));
+        }
+
+        ctx.unpause.store(true, std::memory_order_release);
+        photon::thread_yield();
+        ASSERT_TRUE(wait_blocked([&] { return ctx.done.load(std::memory_order_acquire); }, 5000));
+        EXPECT_EQ(stealer.vcpu, ctx.final_vcpu);
+        EXPECT_EQ(0U, ((partial_thread*)th)->flags & THREAD_PAUSE_WORK_STEALING);
+    }
+}
+
+// thread_yield_to(th) when th is in states::STANDBY on CURRENT's vCPU (and
+// thread_migrate(th, stealer_vcpu) when th is READY) must tolerate concurrent
+// stealing of th from standbyq or runq without asserting on th->state or
+// passing a changed th->get_vcpu() to resume_threads().
+TEST(WorkStealing, yield_to_standby_and_migrate_race_with_stealer) {
+    set_log_output_level(ALOG_FATAL);
+    DEFER(set_log_output_level(ALOG_INFO));
+
+    auto main_vcpu = photon::get_vcpu();
+    IdlingVCpu park_vcpu(0);
+
+    // Deterministic validation: yield_to rejects a SLEEPING thread on current vCPU
+    // and rejects a thread owned by another vCPU with EINVAL.
+    {
+        std::atomic<bool> sleeping{false};
+        auto sleeper = thread_create(+[](void* arg) -> void* {
+            ((std::atomic<bool>*)arg)->store(true, std::memory_order_release);
+            photon::thread_usleep(50 * 1000);
+            return nullptr;
+        }, &sleeping, 64 * 1024, 0, THREAD_JOINABLE);
+        ASSERT_TRUE(wait_sched([&] { return sleeping.load(std::memory_order_acquire); }, 1000));
+        errno = 0;
+        EXPECT_EQ(-1, photon::thread_yield_to(sleeper));
+        EXPECT_EQ(EINVAL, errno);
+        thread_join((join_handle*)sleeper);
+
+        WorkerRec foreign_rec;
+        auto foreign = thread_create(&record_worker, &foreign_rec, 64 * 1024, 0, THREAD_JOINABLE);
+        ASSERT_EQ(0, photon::thread_migrate(foreign, park_vcpu.vcpu));
+        errno = 0;
+        EXPECT_EQ(-1, photon::thread_yield_to(foreign));
+        EXPECT_EQ(EINVAL, errno);
+        ASSERT_TRUE(wait_sched([&] { return foreign_rec.done.load(std::memory_order_acquire); }, 2000));
+        thread_join((join_handle*)foreign);
+    }
+
+    FastStealerVCpu s1, s2;
+
+    constexpr int ROUNDS = 300;
+    for (int r = 0; r < ROUNDS; r++) {
+        struct TargetCtx {
+            photon::vcpu_base* park_vcpu = nullptr;
+            bool migrate_to_park = false;
+            std::atomic<bool> done{false};
+        } ctx;
+        ctx.park_vcpu = park_vcpu.vcpu;
+        ctx.migrate_to_park = (r & 1) != 0;
+
+        photon::thread* target = nullptr;
+        std::atomic<bool> ready_in_standby{false};
+        auto producer = spawn_vcpu(0, [&] {
+            target = thread_create(+[](void* arg) -> void* {
+                auto c = (TargetCtx*)arg;
+                // Hold states::RUNNING briefly or migrate to another vCPU's
+                // standbyq right while main_vcpu may be inside thread_yield_to().
+                photon::spin_wait_n(512);
+                if (c->migrate_to_park && photon::get_vcpu() != c->park_vcpu) {
+                    photon::thread_migrate(photon::CURRENT, c->park_vcpu);
+                }
+                c->done.store(true, std::memory_order_release);
+                return nullptr;
+            }, &ctx, 64 * 1024, 0, THREAD_ENABLE_WORK_STEALING | THREAD_JOINABLE);
+            if (photon::thread_migrate(target, main_vcpu) == 0) {
+                ready_in_standby.store(true, std::memory_order_release);
+            }
+        });
+        while (!ready_in_standby.load(std::memory_order_acquire))
+            photon::spin_wait();
+        producer.join();
+
+        if (load_thread_vcpu(target) == main_vcpu) {
+            auto st = photon::thread_stat(target);
+            if (st == states::STANDBY || st == states::READY) {
+                photon::thread_yield_to(target);
+            }
+        }
+
+        // Also exercise non-current thread_migrate(th2, s1.vcpu) racing with s1
+        // stealing th2 from main_vcpu's runq.
+        WorkerRec mrec;
+        auto th2 = thread_create(&record_worker, &mrec, 64 * 1024, 0,
+                                 THREAD_ENABLE_WORK_STEALING | THREAD_JOINABLE);
+        ASSERT_NE(nullptr, th2);
+        photon::spin_wait_n(64);
+        if (load_thread_vcpu(th2) == main_vcpu &&
+            photon::thread_stat(th2) == states::READY) {
+            photon::thread_migrate(th2, s1.vcpu);
+        }
+
+        ASSERT_TRUE(wait_sched([&] {
+            return ctx.done.load(std::memory_order_acquire) &&
+                   mrec.done.load(std::memory_order_acquire);
+        }, 5000));
+        thread_join((join_handle*)target);
+        thread_join((join_handle*)th2);
+    }
+}
+
+__attribute__((noinline))
+static uint64_t ws_deep_stack_canary(int depth, uint64_t seed) {
+    volatile uint64_t page_words[512]; // 4KB per frame
+    for (int i = 0; i < 512; i += 64) {
+        page_words[i] = seed ^ ((uint64_t)depth << 32) ^ (uint64_t)i;
+    }
+    uint64_t acc = 0;
+    if (depth > 0) {
+        acc = ws_deep_stack_canary(depth - 1, seed);
+    } else {
+        photon::spin_wait_n(256);
+    }
+    for (int i = 0; i < 512; i += 64) {
+        uint64_t expected = seed ^ ((uint64_t)depth << 32) ^ (uint64_t)i;
+        EXPECT_EQ(expected, page_words[i]);
+        acc ^= page_words[i];
+    }
+    return acc;
+}
+
+// stack_pages_gc(th) on a non-current READY/STANDBY thread must prevent th
+// from being stolen until madvise(MADV_DONTNEED) finishes; otherwise a stealer
+// can resume th and grow its live stack below the stale saved RSP while
+// MADV_DONTNEED zeroes those live stack pages.
+TEST(WorkStealing, concurrent_non_current_stack_pages_gc_and_steal) {
+    set_log_output_level(ALOG_FATAL);
+    DEFER(set_log_output_level(ALOG_INFO));
+
+    auto main_vcpu = photon::get_vcpu();
+
+#if !defined(__aarch64__) && defined(__linux__)
+    // Deterministic check: non-current stack_pages_gc(th) on a READY thread
+    // reclaims unused stack pages above saved RSP without switching to th, and
+    // rejects nullptr / DONE / foreign-vCPU targets with EINVAL.
+    {
+        errno = 0;
+        EXPECT_EQ(-1, photon::stack_pages_gc(nullptr));
+        EXPECT_EQ(EINVAL, errno);
+
+        struct NonCurrentGcCtx {
+            char* dirty_page = nullptr;
+            bool yielded = false;
+        } gctx;
+        auto th = thread_create(+[](void* arg) -> void* {
+            auto c = (NonCurrentGcCtx*)arg;
+            recursive_call(256);
+            c->dirty_page = topbuf;
+            c->yielded = true;
+            photon::thread_yield();
+            return nullptr;
+        }, &gctx, 0, 0, THREAD_JOINABLE);
+        photon::thread_yield_to(th);
+        ASSERT_TRUE(gctx.yielded);
+        ASSERT_EQ(states::READY, photon::thread_stat(th));
+        EXPECT_STREQ("Hello, stack", gctx.dirty_page);
+        EXPECT_EQ(0, photon::stack_pages_gc(th));
+        EXPECT_STRNE("Hello, stack", gctx.dirty_page);
+        photon::thread_yield_to(th);
+        ASSERT_EQ(states::DONE, photon::thread_stat(th));
+        errno = 0;
+        EXPECT_EQ(-1, photon::stack_pages_gc(th));
+        EXPECT_EQ(EINVAL, errno);
+        thread_join((join_handle*)th);
+    }
+#endif
+
+    constexpr int N = 8;
+    struct GcTargetArg {
+        uint64_t id = 0;
+        photon::thread* self = nullptr;
+        photon::vcpu_base* home_vcpu = nullptr;
+        std::atomic<bool>* stop = nullptr;
+        std::atomic<uint64_t>* steals = nullptr;
+        std::atomic<bool> done{false};
+    };
+    GcTargetArg args[N];
+    photon::thread* ths[N];
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> steals{0};
+
+    for (int i = 0; i < N; i++) {
+        args[i].id = 0xabc000ULL + (uint64_t)i;
+        args[i].home_vcpu = main_vcpu;
+        args[i].stop = &stop;
+        args[i].steals = &steals;
+        ths[i] = thread_create(+[](void* arg) -> void* {
+            auto a = (GcTargetArg*)arg;
+            for (uint64_t iter = 0; !a->stop->load(std::memory_order_relaxed); iter++) {
+                // Yield at shallow stack depth (high saved RSP), then immediately
+                // recurse 16 * 4KB = 64KB deeper when resumed (possibly on a stealer).
+                photon::thread_yield();
+                ws_deep_stack_canary(16, (a->id << 20) ^ (iter + 1));
+                if (load_thread_vcpu(a->self) != a->home_vcpu) {
+                    a->steals->fetch_add(1, std::memory_order_relaxed);
+                    photon::thread_migrate(a->self, a->home_vcpu);
+                }
+            }
+            a->done.store(true, std::memory_order_release);
+            return nullptr;
+        }, &args[i], 128 * 1024, 0, THREAD_ENABLE_WORK_STEALING | THREAD_JOINABLE);
+        ASSERT_NE(nullptr, ths[i]);
+        args[i].self = ths[i];
+    }
+
+    FastStealerVCpu s1, s2;
+
+    auto start = std::chrono::steady_clock::now();
+    auto min_deadline = start + std::chrono::milliseconds(100);
+    auto max_deadline = start + std::chrono::milliseconds(3000);
+    uint64_t gc_calls = 0;
+    while (std::chrono::steady_clock::now() < min_deadline ||
+           (steals.load(std::memory_order_relaxed) == 0 &&
+            std::chrono::steady_clock::now() < max_deadline)) {
+        for (int i = 0; i < N; i++) {
+            if (load_thread_vcpu(ths[i]) == main_vcpu &&
+                photon::thread_stat(ths[i]) != states::RUNNING) {
+                if (photon::stack_pages_gc(ths[i]) == 0)
+                    gc_calls++;
+            }
+        }
+        photon::thread_yield();
+    }
+    stop.store(true, std::memory_order_release);
+
+    ASSERT_TRUE(wait_sched([&] {
+        for (int i = 0; i < N; i++)
+            if (!args[i].done.load(std::memory_order_acquire))
+                return false;
+        return true;
+    }, 5000));
+
+    for (int i = 0; i < N; i++)
+        thread_join((join_handle*)ths[i]);
+    EXPECT_GT(steals.load(std::memory_order_relaxed), 0U);
+    EXPECT_GT(gc_calls, 0U);
 }
 
 TEST(future, test1) {
