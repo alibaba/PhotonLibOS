@@ -195,10 +195,12 @@ std::pair<ssize_t, ssize_t> Headers::range() const {
 
 bool Headers::chunked() const {
     static const charset ows(" \t");
-    auto r = equal_range("Transfer-Encoding");
+    auto r = std::equal_range(kv_begin(), kv_end(), "Transfer-Encoding", HA(this));
     estring_view coding;
     uint16_t offset = 0;
-    for (auto i = r.first.i; i < r.second.i; i++) {
+    auto begin = (uint16_t)(r.first - kv_begin());
+    auto end = (uint16_t)(r.second - kv_begin());
+    for (auto i = begin; i < end; i++) {
         auto v = kv(i).second;
         if (v.offset() < offset) continue;
         for (auto e : (v | m_buf).split(",")) {
