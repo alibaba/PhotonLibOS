@@ -231,6 +231,13 @@ struct ObjectUploadOptions {
   std::string *etag = nullptr;
 };
 
+struct ObjectGetOptions {
+  // inputs
+  // When non-empty, the GET carries If-Match with this ETag; on mismatch the
+  // server returns 412 (mapped to ESTALE) instead of the object body.
+  std::string_view if_match;
+};
+
 // [WARNING] Retry-safety MUST be made sure. The framework re-calls from the 
 // beginning on retry, so the callback must write the complete body 
 // (content_length bytes) in one call, looping internally if needed. 
@@ -262,26 +269,36 @@ class Client : public Object {
   // return -1
   ssize_t get_object_range(std::string_view object, char* buf, size_t size,
                            off_t offset, ObjectHeaderMeta* meta = nullptr,
+                           ObjectGetOptions* options = nullptr,
                            RequestTrace* trace = nullptr) {
     return get_object_range(object, offset, size,
         [buf, size](IStream* input) -> ssize_t {
           return input->read(buf, size);
-        }, meta, trace);
+        }, meta, options, trace);
   }
   ssize_t get_object_range(std::string_view object, const struct iovec* iov,
                            int iovcnt, off_t offset,
                            ObjectHeaderMeta* meta = nullptr,
+                           ObjectGetOptions* options = nullptr,
                            RequestTrace* trace = nullptr) {
     iovector_view view((struct iovec*)iov, iovcnt);
     return get_object_range(object, offset, view.sum(),
         [iov, iovcnt](IStream* input) -> ssize_t {
           return input->readv(iov, iovcnt);
-        }, meta, trace);
+        }, meta, options, trace);
+  }
+  ssize_t get_object_range(std::string_view object, const struct iovec* iov,
+                           int iovcnt, off_t offset, const std::string& if_match,
+                           ObjectHeaderMeta* meta = nullptr,
+                           RequestTrace* trace = nullptr) {
+    ObjectGetOptions opts{.if_match = if_match};
+    return get_object_range(object, iov, iovcnt, offset, meta, &opts, trace);
   }
 
   virtual ssize_t get_object_range(std::string_view object, off_t offset,
                                    size_t cnt, BodyReader reader,
                                    ObjectHeaderMeta* meta = nullptr,
+                                   ObjectGetOptions* options = nullptr,
                                    RequestTrace* trace = nullptr) = 0;
 
   // Download several byte ranges of one object within a single GET request,
