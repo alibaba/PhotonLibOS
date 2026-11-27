@@ -17,6 +17,7 @@ limitations under the License.
 #include <fcntl.h>
 #include <time.h>
 #include <netinet/tcp.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <cstddef>
@@ -210,6 +211,158 @@ TEST(http_client, zero_connection_idle_expiration_never_expires) {
     EXPECT_EQ(1, connections); // still reusable: 0 must not expire anything
     request();
     EXPECT_EQ(1, connections);
+}
+
+// A local listener whose accept queue is kept full: the kernel drops new
+// SYNs, so connecting stalls until timeout instead of being refused.
+struct StalledListener {
+    int fd = -1;
+    uint16_t port = 0;
+    bool stalled = false;
+    std::vector<std::unique_ptr<ISocketStream>> fillers;
+    StalledListener() {
+        fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return;
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (::bind(fd, (sockaddr*)&addr, sizeof(addr)) < 0) return;
+        socklen_t len = sizeof(addr);
+        if (::getsockname(fd, (sockaddr*)&addr, &len) < 0) return;
+        port = ntohs(addr.sin_port);
+        if (::listen(fd, 1) < 0) return;
+        std::unique_ptr<ISocketClient> cli(new_tcp_socket_client());
+        cli->timeout(300'000);
+        for (int i = 0; i < 8 && !stalled; i++) {
+            auto s = cli->connect(EndPoint(IPAddr("127.0.0.1"), port));
+            if (s) fillers.emplace_back(s);
+            else stalled = (errno == ETIMEDOUT);
+        }
+    }
+    ~StalledListener() {
+        if (fd >= 0) ::close(fd);
+    }
+};
+
+TEST(http_client, dial_timeout_caps_connection_attempt) {
+    StalledListener l;
+    if (!l.stalled)
+        GTEST_SKIP() << "cannot stall connects (kernel may RST on accept-queue overflow)";
+    std::unique_ptr<Client> client(new_http_client());
+    client->timeout(5'000'000);
+    client->set_dial_timeout(300'000);
+    EXPECT_EQ(300'000, client->dial_timeout());
+    auto target = std::string("http://127.0.0.1:") + std::to_string(l.port) + "/";
+    Client::OperationOnStack<1024> op(client.get(), Verb::GET, target);
+    ASSERT_EQ(0, op.req.headers.content_length(0));
+    op.retry = 0;
+    errno = 0;
+    auto start = photon::now;
+    EXPECT_EQ(-1, op.call());
+    auto elapsed = photon::now - start;
+    EXPECT_EQ(ETIMEDOUT, errno);
+    EXPECT_GE(elapsed, 300'000);
+    EXPECT_LT(elapsed, 2'000'000); // died on the dial cap, not the overall timeout
+}
+
+TEST(http_client, dial_timeout_bounded_by_overall_timeout) {
+    StalledListener l;
+    if (!l.stalled)
+        GTEST_SKIP() << "cannot stall connects (kernel may RST on accept-queue overflow)";
+    std::unique_ptr<Client> client(new_http_client());
+    client->timeout(300'000);
+    client->set_dial_timeout(5'000'000);
+    auto target = std::string("http://127.0.0.1:") + std::to_string(l.port) + "/";
+    Client::OperationOnStack<1024> op(client.get(), Verb::GET, target);
+    ASSERT_EQ(0, op.req.headers.content_length(0));
+    op.retry = 0;
+    errno = 0;
+    auto start = photon::now;
+    EXPECT_EQ(-1, op.call());
+    auto elapsed = photon::now - start;
+    EXPECT_EQ(ETIMEDOUT, errno);
+    EXPECT_GE(elapsed, 300'000);
+    EXPECT_LT(elapsed, 2'000'000); // the smaller overall timeout won
+}
+
+TEST(http_client, zero_dial_timeout_adds_no_cap) {
+    StalledListener l;
+    if (!l.stalled)
+        GTEST_SKIP() << "cannot stall connects (kernel may RST on accept-queue overflow)";
+    std::unique_ptr<Client> client(new_http_client());
+    client->timeout(300'000);
+    client->set_dial_timeout(0); // treated as -1ULL, see client.h
+    auto target = std::string("http://127.0.0.1:") + std::to_string(l.port) + "/";
+    Client::OperationOnStack<1024> op(client.get(), Verb::GET, target);
+    ASSERT_EQ(0, op.req.headers.content_length(0));
+    op.retry = 0;
+    auto start = photon::now;
+    EXPECT_EQ(-1, op.call());
+    auto elapsed = photon::now - start;
+    EXPECT_GE(elapsed, 300'000); // without the clamp the dial would fail instantly
+    EXPECT_LT(elapsed, 2'000'000);
+}
+
+class SlowHandler : public http::HTTPHandler {
+public:
+    int handle_request(http::Request&, http::Response& resp, std::string_view) {
+        photon::thread_usleep(500'000);
+        resp.set_result(200);
+        resp.headers.content_length(0);
+        return 0;
+    }
+};
+
+TEST(http_client, dial_timeout_does_not_cap_response_transfer) {
+    std::unique_ptr<ISocketServer> tcp(new_tcp_socket_server());
+    ASSERT_EQ(0, tcp->bind_v4localhost());
+    ASSERT_EQ(0, tcp->listen());
+    std::unique_ptr<HTTPServer> server(new_http_server());
+    server->add_handler(new SlowHandler, true, "/slow");
+    tcp->set_handler(server->get_connection_handler());
+    ASSERT_EQ(0, tcp->start_loop());
+    std::unique_ptr<Client> client(new_http_client());
+    client->timeout(5'000'000);
+    client->set_dial_timeout(200'000);
+    auto target = std::string("http://127.0.0.1:") +
+        std::to_string(tcp->getsockname().port) + "/slow";
+    Client::OperationOnStack<1024> op(client.get(), Verb::GET, target);
+    ASSERT_EQ(0, op.req.headers.content_length(0));
+    op.retry = 0;
+    auto start = photon::now;
+    ASSERT_EQ(0, op.call());
+    EXPECT_EQ(200, op.resp.status_code());
+    EXPECT_GE(photon::now - start, 500'000); // response waited past the dial cap
+}
+
+TEST(http_client, dial_timeout_does_not_cap_tls_handshake) {
+    // A server that accepts but never answers the handshake: the client TLS
+    // handshake runs on first I/O and must obey the overall timeout.
+    std::unique_ptr<ISocketServer> tcp(new_tcp_socket_server());
+    ASSERT_EQ(0, tcp->bind_v4localhost());
+    ASSERT_EQ(0, tcp->listen());
+    auto hold = [](ISocketStream*) {
+        photon::thread_usleep(1'200'000);
+        return 0;
+    };
+    tcp->set_handler(hold);
+    ASSERT_EQ(0, tcp->start_loop());
+    std::unique_ptr<Client> client(new_http_client());
+    client->timeout(800'000);
+    client->set_dial_timeout(200'000);
+    auto target = std::string("https://127.0.0.1:") +
+        std::to_string(tcp->getsockname().port) + "/";
+    Client::OperationOnStack<1024> op(client.get(), Verb::GET, target);
+    ASSERT_EQ(0, op.req.headers.content_length(0));
+    op.retry = 0;
+    errno = 0;
+    auto start = photon::now;
+    EXPECT_EQ(-1, op.call());
+    auto elapsed = photon::now - start;
+    EXPECT_EQ(ETIMEDOUT, errno);
+    EXPECT_GE(elapsed, 800'000); // the handshake waited on the overall timeout
+    EXPECT_LT(elapsed, 2'500'000);
+    photon::thread_usleep(500'000); // let the holding handler finish before teardown
 }
 
 TEST(http_client, get) {
